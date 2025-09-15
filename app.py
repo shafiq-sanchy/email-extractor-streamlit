@@ -46,7 +46,7 @@ if st.button("Extract Emails"):
     # Resolve URLs before crawling
     websites = [resolve_url(u.strip()) for u in urls_input.splitlines() if u.strip()]
     
-     if not websites:
+    if not websites:
         st.warning("Please enter at least one URL.")
     else:
         all_results = {}
