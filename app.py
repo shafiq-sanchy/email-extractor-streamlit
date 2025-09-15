@@ -28,7 +28,7 @@ def resolve_url(url):
 # Streamlit UI
 # ---------------------
 st.set_page_config(page_title="Email Extractor", layout="wide")
-st.title("📧 Multi-Site Email Extractor with Crawler")
+st.title("📧 Email Extractor created by Shafiq Sanchy")
 
 urls_input = st.text_area(
     "Enter website URLs (one per line)",
