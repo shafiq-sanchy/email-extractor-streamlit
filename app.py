@@ -25,7 +25,7 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 MAX_WORKERS = 12
 
 # keywords to exclude trap/garbage addresses
-EXCLUDE_KEYWORDS = ["sentry", "domain", "example", "your", "yours", "john", "fraud", "scam", "youname", "name", "order", "invoice", "support", "press", "privacy", "noreply", "no-reply"]
+EXCLUDE_KEYWORDS = ["sentry", "2x", ".png", ".jpg", ".webp", "order", "domain", "example", "your", "yours", "john", "fraud", "scam", "youname", "name", "order", "invoice", "support", "press", "privacy", "noreply", "no-reply"]
 
 # ---------------------
 # Helper functions
