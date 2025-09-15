@@ -15,14 +15,26 @@ import pandas as pd
 EMAIL_REGEX = re.compile(r'[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}', re.I)
 HEADERS = {"User-Agent": "EmailExtractor/1.0"}
 
-# Resolve shortened URLs automatically
+# ---------------------
+# Helper functions
+# ---------------------
 def resolve_url(url):
+    """Resolve shortened URLs to their final destination."""
     try:
         resp = requests.head(url, allow_redirects=True, headers=HEADERS, timeout=10)
-        return resp.url  # final destination URL
+        return resp.url
     except Exception as e:
         st.warning(f"⚠ Could not resolve {url}: {e}")
         return url
+
+def normalize_url(url):
+    """Ensure URL starts with http:// or https://"""
+    url = url.strip()
+    if not url:
+        return None
+    if not url.lower().startswith(("http://", "https://")):
+        url = "https://" + url
+    return url
 
 # ---------------------
 # Streamlit UI
@@ -32,7 +44,7 @@ st.title("📧 Email Extractor created by Shafiq Sanchy")
 
 urls_input = st.text_area(
     "Enter website URLs (one per line)",
-    
+    "fusiondigital.ie\nexample.com"
 )
 
 crawl_depth = st.slider("Crawl depth (0 = only homepage)", 0, 3, 1)
@@ -43,9 +55,14 @@ delay = st.number_input("Delay between requests (seconds)", min_value=0.0, max_v
 # Extract emails
 # ---------------------
 if st.button("Extract Emails"):
-    # Resolve URLs before crawling
-    websites = [resolve_url(u.strip()) for u in urls_input.splitlines() if u.strip()]
-    
+    # Normalize and resolve URLs
+    websites = []
+    for u in urls_input.splitlines():
+        norm_url = normalize_url(u)
+        if norm_url:
+            final_url = resolve_url(norm_url)
+            websites.append(final_url)
+
     if not websites:
         st.warning("Please enter at least one URL.")
     else:
@@ -53,10 +70,6 @@ if st.button("Extract Emails"):
 
         for url in websites:
             st.subheader(f"🔍 Scanning {url}")
-            if not url.lower().startswith(("http://", "https://")):
-                st.warning(f"Skipping invalid URL (must start with http:// or https://): {url}")
-                all_results[url] = set()
-                continue
 
             parsed_root = urlparse(url)
             base_domain = parsed_root.netloc
@@ -124,7 +137,7 @@ if st.button("Extract Emails"):
             if emails:
                 st.markdown(f"**{site}**")
                 df = pd.DataFrame(sorted(emails), columns=["Email"])
-                st.dataframe(df, height=min(300, 30 * len(emails)))
+                st.text_area(f"Emails from {site}", value="\n".join(sorted(emails)), height=200)
             else:
                 st.markdown(f"**{site}** → No emails found.")
 
