@@ -11,22 +11,17 @@ import pandas as pd
 import urllib3
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-# ---------------------
 # Optional MX verification
-# ---------------------
 try:
     import dns.resolver
     DNS_AVAILABLE = True
 except ImportError:
     DNS_AVAILABLE = False
 
-# ---------------------
-# Config & constants
-# ---------------------
 EMAIL_REGEX = re.compile(r'[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}', re.I)
 HEADERS = {"User-Agent": "EmailExtractor/1.0"}
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-MAX_WORKERS = 10  # Adjust number of parallel threads
+MAX_WORKERS = 10
 
 # ---------------------
 # Helper functions
@@ -64,10 +59,8 @@ def is_email_valid(email):
 
 def extract_emails_from_html(html):
     found_emails = set()
-    # regex from text
     for m in set(EMAIL_REGEX.findall(html)):
         found_emails.add(m.lower())
-    # mailto links
     soup = BeautifulSoup(html, "html.parser")
     for a in soup.find_all("a", href=True):
         if a['href'].startswith("mailto:"):
@@ -92,10 +85,8 @@ def crawl_site(url, crawl_depth=1, max_pages=30, delay=0.5):
         except:
             continue
 
-        # Extract emails
         found_emails.update(extract_emails_from_html(html))
 
-        # Crawl internal links
         if cur_depth < crawl_depth:
             soup = BeautifulSoup(html, "html.parser")
             for a in soup.find_all("a", href=True):
@@ -118,23 +109,34 @@ def crawl_site(url, crawl_depth=1, max_pages=30, delay=0.5):
 # Streamlit UI
 # ---------------------
 st.set_page_config(page_title="Email Extractor", layout="wide")
-st.title("📧 Email Extractor created by Shafiq Sanchy")
 
-urls_input = st.text_area(
-    "Enter website URLs (one per line)",
-    "fusiondigital.ie\nexample.com"
-)
+st.markdown("""
+<div style="padding:20px; background-color:#f8f9fa; border-radius:12px; margin-bottom:20px;">
+<h1 style="color:#4B0082;">📧 Multi-Site Email Extractor</h1>
+<p style="color:#333; font-size:16px;">Enter website URLs below to extract emails. Supports multiple websites, crawling multiple pages, and optional MX verification.</p>
+</div>
+""", unsafe_allow_html=True)
 
-crawl_depth = st.slider("Crawl depth (0 = only homepage)", 0, 3, 1)
-max_pages = st.number_input("Max pages per site", min_value=1, max_value=200, value=30)
-delay = st.number_input("Delay between requests (seconds)", min_value=0.0, max_value=5.0, value=0.2, step=0.1)
-verify_emails = st.checkbox("✅ Verify emails (MX check)", value=False)
+# Inputs Section
+with st.container():
+    col1, col2 = st.columns([3, 1])
 
-# ---------------------
-# Extract emails
-# ---------------------
-if st.button("Extract Emails"):
-    # Normalize and resolve URLs
+    with col1:
+        urls_input = st.text_area(
+            "Enter website URLs (one per line)",
+            "fusiondigital.ie\nexample.com",
+            height=150
+        )
+    with col2:
+        crawl_depth = st.slider("Crawl depth (0=homepage)", 0, 3, 1)
+        max_pages = st.number_input("Max pages per site", 1, 200, 30)
+        delay = st.number_input("Delay between requests (seconds)", 0.0, 5.0, 0.2, 0.1)
+        verify_emails = st.checkbox("✅ Verify emails (MX check)", value=False)
+
+st.markdown("---")
+
+# Extract Emails
+if st.button("🚀 Extract Emails"):
     websites = []
     for u in urls_input.splitlines():
         norm_url = normalize_url(u)
@@ -154,7 +156,6 @@ if st.button("Extract Emails"):
             future_to_url = {executor.submit(crawl_site, url, crawl_depth, max_pages, delay): url for url in websites}
             for future in as_completed(future_to_url):
                 url, emails = future.result()
-                # Optional verification
                 if verify_emails:
                     verified_emails = {e for e in emails if is_email_valid(e) is True}
                 else:
@@ -171,7 +172,7 @@ if st.button("Extract Emails"):
                     "Email": sorted(emails),
                     "Verified": [is_email_valid(e) if verify_emails else "Skipped" for e in sorted(emails)]
                 })
-                st.dataframe(df, height=min(300, 30*len(emails)))
+                st.dataframe(df, height=min(400, 30*len(emails)))
             else:
                 st.markdown(f"**{site}** → No emails found.")
 
@@ -192,7 +193,32 @@ if st.button("Extract Emails"):
                 mime="text/csv"
             )
 
-        # Completion notification
+        # Completion notification with popup & sound
         st.balloons()
         st.success(f"🎉 Extraction completed! Total emails found: {total_emails_found}")
         st.info("💡 Done by Shafiq Sanchy")
+
+        # JS popup + sound
+        js_code = f"""
+        <script>
+        function notifyMe() {{
+            if (!("Notification" in window)) {{
+                alert("Extraction done! Total emails: {total_emails_found}");
+                return;
+            }}
+            if (Notification.permission !== "granted")
+                Notification.requestPermission();
+            if (Notification.permission === "granted") {{
+                var notification = new Notification("Email Extractor", {{
+                    body: "Extraction completed! Total emails: {total_emails_found}\\nBy Shafiq Sanchy",
+                    icon: "https://cdn-icons-png.flaticon.com/512/561/561127.png"
+                }});
+            }}
+            var audio = new Audio("https://www.soundjay.com/buttons/sounds/beep-07.mp3");
+            audio.play();
+        }}
+        notifyMe();
+        </script>
+        """
+        import streamlit.components.v1 as components
+        components.html(js_code, height=0, width=0)
