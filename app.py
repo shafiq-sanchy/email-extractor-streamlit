@@ -123,7 +123,7 @@ st.set_page_config(page_title="Email Extractor", layout="wide")
 st.markdown("""
 <div style="margin-bottom:20px;">
 <h1 style="color:#1F2328;">📧 Email Extractor</h1>
-<p style="color:#333; font-size:16px;">Enter website URLs below to extract emails. </p>
+<p style="color:#333; font-size:16px;">Enter website URLs below to extract emails. Supports multiple websites, and MX verification. </p>
 </div>
 """, unsafe_allow_html=True)
 
@@ -190,7 +190,7 @@ if st.button("🚀 Extract Emails"):
         st.markdown("<br><br>", unsafe_allow_html=True)
         st.success(f"🎉 Extraction completed! Total emails found: {total_emails_found}")
 
-# CSV download
+        # CSV download
         if any(len(es) for es in all_results.values()):
             csv_buffer = io.StringIO()
             writer = csv.writer(csv_buffer)
@@ -202,7 +202,7 @@ if st.button("🚀 Extract Emails"):
             
             st.download_button("📥 Download all emails (CSV)", csv_bytes, "emails.csv", "text/csv")
         
-        st.info("💡 Done by Shafiq Sanchy")
+        # st.info("💡 Done by Shafiq Sanchy")
             
         js_code = f"""
         <script>
