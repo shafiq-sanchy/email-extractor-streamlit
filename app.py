@@ -19,4 +19,4 @@ urls_input = st.text_area(
     "https://example.com\nhttps://www.python.org"
 )
 
-crawl_depth = st.slider("Crawl depth (0 = only homepage)", 0, 3, 1)_
+crawl_depth = st.slider("Crawl depth (0 = only homepage)", 0, 3, 1)
