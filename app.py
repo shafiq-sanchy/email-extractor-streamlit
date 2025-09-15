@@ -121,7 +121,7 @@ st.set_page_config(page_title="Email Extractor", layout="wide")
 
 # Header
 st.markdown("""
-<div style="padding:20px; background-color:#F6F8FA; border-radius:12px; margin-bottom:20px;">
+<div style="margin-bottom:20px;">
 <h1 style="color:#1F2328;">📧 Email Extractor</h1>
 <p style="color:#333; font-size:16px;">Enter website URLs below to extract emails. </p>
 </div>
@@ -225,7 +225,7 @@ if st.button("🚀 Extract Emails"):
 
 # Footer
 st.markdown("""
-<div style="padding:10px; background-color:#f1f1f1; border-top:1px solid #ccc; margin-top:30px; text-align:center; font-size:14px; color:#555;">
-This app is designed and developed by Shafiq Sanchy, © 2025
+<div style="padding:10px; border-top:1px solid #ccc; margin-top:50px; text-align:center; font-size:14px; color:#555;">
+© Shafiq Sanchy 2025.
 </div>
 """, unsafe_allow_html=True)
