@@ -15,6 +15,15 @@ import pandas as pd
 EMAIL_REGEX = re.compile(r'[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}', re.I)
 HEADERS = {"User-Agent": "EmailExtractor/1.0"}
 
+# Resolve shortened URLs automatically
+def resolve_url(url):
+    try:
+        resp = requests.head(url, allow_redirects=True, headers=HEADERS, timeout=10)
+        return resp.url  # final destination URL
+    except Exception as e:
+        st.warning(f"⚠ Could not resolve {url}: {e}")
+        return url
+
 # ---------------------
 # Streamlit UI
 # ---------------------
@@ -34,7 +43,9 @@ delay = st.number_input("Delay between requests (seconds)", min_value=0.0, max_v
 # Extract emails
 # ---------------------
 if st.button("Extract Emails"):
-    websites = [u.strip() for u in urls_input.splitlines() if u.strip()]
+    # Resolve short URLs before crawling
+websites = [resolve_url(u.strip()) for u in urls_input.splitlines() if u.strip()]
+
     if not websites:
         st.warning("Please enter at least one URL.")
     else:
