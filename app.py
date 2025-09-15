@@ -43,11 +43,10 @@ delay = st.number_input("Delay between requests (seconds)", min_value=0.0, max_v
 # Extract emails
 # ---------------------
 if st.button("Extract Emails"):
-    # Resolve short URLs before crawling
-websites = [resolve_url(u.strip()) for u in urls_input.splitlines() if u.strip()]
-
-
-    if not websites:
+    # Resolve URLs before crawling
+    websites = [resolve_url(u.strip()) for u in urls_input.splitlines() if u.strip()]
+    
+     if not websites:
         st.warning("Please enter at least one URL.")
     else:
         all_results = {}
