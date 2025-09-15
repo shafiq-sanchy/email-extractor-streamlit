@@ -100,7 +100,6 @@ if st.button("Extract Emails"):
 
             if found_emails:
                 st.success(f"✅ Found {len(found_emails)} emails on {url}")
-st.text_area(f"Emails from {url}", value=emails_text, height=200)
             else:
                 st.warning(f"No emails found on {url}")
 
