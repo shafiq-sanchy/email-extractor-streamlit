@@ -8,8 +8,7 @@ import requests
 from bs4 import BeautifulSoup
 import streamlit as st
 
-EMAIL_REGEX = re.compile(r'[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}')
-
+EMAIL_REGEX = re.compile(r'[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}', re.I)
 HEADERS = {"User-Agent": "EmailExtractor/1.0"}
 
 st.set_page_config(page_title="Email Extractor", layout="wide")
@@ -20,4 +19,89 @@ urls_input = st.text_area(
     "https://example.com\nhttps://www.python.org"
 )
 
-crawl_depth = st.slide_
+# <-- Correct API call here: st.slider (not st.slide_)
+crawl_depth = st.slider("Crawl depth (0 = only homepage)", 0, 3, 1)
+max_pages = st.number_input("Max pages per site", min_value=1, max_value=200, value=30)
+delay = st.number_input("Delay between requests (seconds)", min_value=0.0, max_value=5.0, value=0.5, step=0.1)
+
+if st.button("Extract Emails"):
+    websites = [u.strip() for u in urls_input.splitlines() if u.strip()]
+    if not websites:
+        st.warning("Please enter at least one URL.")
+    else:
+        all_results = {}
+
+        for url in websites:
+            st.subheader(f"🔍 Scanning {url}")
+            if not url.lower().startswith(("http://", "https://")):
+                st.warning(f"Skipping invalid URL (must start with http:// or https://): {url}")
+                all_results[url] = set()
+                continue
+
+            parsed_root = urlparse(url)
+            base_domain = parsed_root.netloc
+
+            to_visit = [(url, 0)]
+            seen = set([url])
+            found_emails = set()
+            pages_processed = 0
+
+            progress = st.progress(0)
+            status = st.empty()
+
+            while to_visit and pages_processed < max_pages:
+                current_url, cur_depth = to_visit.pop(0)
+                pages_processed += 1
+                status.text(f"({pages_processed}) Visiting: {current_url}")
+
+                try:
+                    resp = requests.get(current_url, headers=HEADERS, timeout=10)
+                    html = resp.text
+                except Exception as e:
+                    st.write(f"❌ Failed to fetch {current_url}: {e}")
+                    continue
+
+                # extract emails
+                for m in set(EMAIL_REGEX.findall(html)):
+                    found_emails.add(m.lower())
+
+                # crawl internal links
+                if cur_depth < crawl_depth:
+                    soup = BeautifulSoup(html, "html.parser")
+                    for a in soup.find_all("a", href=True):
+                        href = a['href'].strip()
+                        joined = urljoin(current_url, href)
+                        p = urlparse(joined)
+
+                        if p.scheme not in ("http", "https"):
+                            continue
+                        if p.netloc != base_domain:
+                            continue
+
+                        norm = p._replace(fragment="").geturl()
+                        if norm not in seen:
+                            seen.add(norm)
+                            to_visit.append((norm, cur_depth + 1))
+
+                progress.progress(min(1.0, pages_processed / float(max_pages)))
+                time.sleep(delay)
+
+            progress.empty()
+            status.empty()
+
+            if found_emails:
+                st.success(f"✅ Found {len(found_emails)} emails on {url}")
+                st.write("\n".join(sorted(found_emails)))
+            else:
+                st.warning(f"No emails found on {url}")
+
+            all_results[url] = found_emails
+
+        # Summary
+        st.subheader("📊 Summary")
+        for site, emails in all_results.items():
+            st.write(f"**{site}** → {len(emails)} emails")
+
+        # CSV download across all sites
+        if any(len(es) for es in all_results.values()):
+            csv_buffer = io.StringIO(_
