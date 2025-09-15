@@ -183,11 +183,6 @@ if st.button("🚀 Extract Emails"):
             else:
                 st.markdown(f"**{site}** → No emails found.")
 
-        # Notification
-        st.balloons()
-        st.success(f"🎉 Extraction completed! Total emails found: {total_emails_found}")
-        st.info("💡 Done by Shafiq Sanchy")
-
         # CSV download
         if any(len(es) for es in all_results.values()):
             csv_buffer = io.StringIO()
@@ -197,7 +192,13 @@ if st.button("🚀 Extract Emails"):
                 for e in sorted(emails):
                     writer.writerow([site, e, is_email_valid(e) if verify_emails else "Skipped"])
             csv_bytes = csv_buffer.getvalue().encode("utf-8")
+            st.markdown("<br><br>", unsafe_allow_html=True)
             st.download_button("📥 Download all emails (CSV)", csv_bytes, "emails.csv", "text/csv")
+        
+        # Notification
+        st.balloons()
+        st.success(f"🎉 Extraction completed! Total emails found: {total_emails_found}")
+        st.info("💡 Done by Shafiq Sanchy")
             
         js_code = f"""
         <script>
