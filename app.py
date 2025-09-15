@@ -21,7 +21,7 @@ HEADERS = {"User-Agent": "EmailExtractor/1.0"}
 def resolve_url(url):
     """Resolve shortened URLs to their final destination."""
     try:
-        resp = requests.head(url, allow_redirects=True, headers=HEADERS, timeout=10)
+        resp = requests.head(url, allow_redirects=True, headers=HEADERS, timeout=10, verify=False)
         return resp.url
     except Exception as e:
         st.warning(f"⚠ Could not resolve {url}: {e}")
@@ -88,7 +88,7 @@ if st.button("Extract Emails"):
                 status.text(f"({pages_processed}) Visiting: {current_url}")
 
                 try:
-                    resp = requests.get(current_url, headers=HEADERS, timeout=10)
+                    resp = requests.get(current_url, headers=HEADERS, timeout=10, verify=False)
                     html = resp.text
                 except Exception as e:
                     st.write(f"❌ Failed to fetch {current_url}: {e}")
