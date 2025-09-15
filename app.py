@@ -25,7 +25,7 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 MAX_WORKERS = 12
 
 # keywords to exclude trap/garbage addresses
-EXCLUDE_KEYWORDS = ["sentry", "support", "press", "privacy", "noreply", "no-reply"]
+EXCLUDE_KEYWORDS = ["sentry", "domain", "example", "your", "yours", "john", "fraud", "scam", "youname", "name", "order", "invoice", "support", "press", "privacy", "noreply", "no-reply"]
 
 # ---------------------
 # Helper functions
@@ -48,7 +48,7 @@ def resolve_url(url):
 def is_email_valid(email):
     """Very basic MX check (optional)."""
     if not DNS_AVAILABLE:
-        return "Skipped"
+        return "DNS not available"
     try:
         domain = email.split("@")[1]
         mx_records = dns.resolver.resolve(domain, 'MX')
@@ -117,7 +117,7 @@ st.set_page_config(page_title="Email Extractor", layout="wide")
 st.markdown("""
 <div style="margin-bottom:20px;">
 <h1 style="color:#1F2328;">📧 Email Extractor</h1>
-<p style="color:#333; font-size:16px;">Extract emails from websites fast. Supports multiple URLs, crawl depth, and MX validation.</p>
+<p style="color:#333; font-size:16px;">Extract emails from websites. Supports multiple URLs, crawl depth, and MX validation.</p>
 </div>
 """, unsafe_allow_html=True)
 
@@ -233,6 +233,6 @@ if st.button("🚀 Extract Emails"):
 # Footer
 st.markdown("""
 <div style="padding:15px; margin-top:50px; text-align:center; font-size:14px; color:#555; border-top:1px solid #eee;">
-This app is designed and developed by <b>Shafiq Sanchy</b>. © 2025
+© Shafiq Sanchy 2025
 </div>
 """, unsafe_allow_html=True)
