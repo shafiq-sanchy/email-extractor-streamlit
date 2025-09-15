@@ -8,8 +8,16 @@ import requests
 from bs4 import BeautifulSoup
 import streamlit as st
 import pandas as pd
-import dns.resolver
 import urllib3
+
+# ---------------------
+# Optional MX verification
+# ---------------------
+try:
+    import dns.resolver
+    DNS_AVAILABLE = True
+except ImportError:
+    DNS_AVAILABLE = False
 
 # ---------------------
 # Config & constants
@@ -46,7 +54,9 @@ def normalize_url(url):
     return url
 
 def is_email_valid(email):
-    """Check if email domain has MX records."""
+    """Check if email domain has MX records (safe check)."""
+    if not DNS_AVAILABLE:
+        return "Skipped"
     try:
         domain = email.split("@")[1]
         records = dns.resolver.resolve(domain, 'MX')
@@ -68,7 +78,7 @@ urls_input = st.text_area(
 crawl_depth = st.slider("Crawl depth (0 = only homepage)", 0, 3, 1)
 max_pages = st.number_input("Max pages per site", min_value=1, max_value=200, value=30)
 delay = st.number_input("Delay between requests (seconds)", min_value=0.0, max_value=5.0, value=0.5, step=0.1)
-verify_emails = st.checkbox("✅ Verify emails (MX check)")
+verify_emails = st.checkbox("✅ Verify emails (MX check)", value=False)
 
 # ---------------------
 # Extract emails
@@ -144,7 +154,7 @@ if st.button("Extract Emails"):
 
             # Verify emails if checkbox selected
             if verify_emails and found_emails:
-                verified_emails = {e for e in found_emails if is_email_valid(e)}
+                verified_emails = {e for e in found_emails if is_email_valid(e) is True}
             else:
                 verified_emails = found_emails
 
