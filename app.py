@@ -19,7 +19,6 @@ urls_input = st.text_area(
     "https://example.com\nhttps://www.python.org"
 )
 
-# <-- Correct API call here: st.slider (not st.slide_)
 crawl_depth = st.slider("Crawl depth (0 = only homepage)", 0, 3, 1)
 max_pages = st.number_input("Max pages per site", min_value=1, max_value=200, value=30)
 delay = st.number_input("Delay between requests (seconds)", min_value=0.0, max_value=5.0, value=0.5, step=0.1)
@@ -97,11 +96,21 @@ if st.button("Extract Emails"):
 
             all_results[url] = found_emails
 
-        # Summary
+        # 📊 Summary
         st.subheader("📊 Summary")
         for site, emails in all_results.items():
             st.write(f"**{site}** → {len(emails)} emails")
 
-        # CSV download across all sites
+        # 📥 CSV download across all sites
         if any(len(es) for es in all_results.values()):
-            csv_buffer = io.StringIO(_
+            csv_buffer = io.StringIO()
+            writer = csv.writer(csv_buffer)
+            writer.writerow(["website", "email"])
+            for site, emails in all_results.items():
+                for e in sorted(emails):
+                    writer.writerow([site, e])
+            csv_bytes = csv_buffer.getvalue().encode("utf-8")
+
+            st.download_button(
+                "📥 Download all emails (CSV)",
+                data=csv_byte_
