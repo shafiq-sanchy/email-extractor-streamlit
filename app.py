@@ -23,7 +23,7 @@ st.title("📧 Multi-Site Email Extractor with Crawler")
 
 urls_input = st.text_area(
     "Enter website URLs (one per line)",
-    "https://example.com\nhttps://www.python.org"
+    
 )
 
 crawl_depth = st.slider("Crawl depth (0 = only homepage)", 0, 3, 1)
