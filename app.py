@@ -3,6 +3,7 @@ import re
 import io
 import csv
 import time
+import smtplib
 from urllib.parse import urljoin, urlparse
 import requests
 from bs4 import BeautifulSoup
@@ -11,7 +12,7 @@ import pandas as pd
 import urllib3
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-# Optional MX verification
+# Optional MX & SMTP verification
 try:
     import dns.resolver
     DNS_AVAILABLE = True
@@ -37,14 +38,8 @@ def normalize_url(url):
 def resolve_url(url):
     try:
         resp = requests.head(url, allow_redirects=True, headers=HEADERS, timeout=10, verify=False)
-        final_url = resp.url
-        try:
-            requests.get(final_url, headers=HEADERS, timeout=10, verify=False)
-        except:
-            pass
-        return final_url
-    except Exception as e:
-        st.warning(f"⚠ Could not resolve {url}: {e}")
+        return resp.url
+    except:
         return url
 
 def is_email_valid(email):
@@ -52,8 +47,22 @@ def is_email_valid(email):
         return "Skipped"
     try:
         domain = email.split("@")[1]
-        records = dns.resolver.resolve(domain, 'MX')
-        return True if records else False
+        mx_records = dns.resolver.resolve(domain, 'MX')
+        mx_hosts = [r.exchange.to_text() for r in mx_records]
+
+        # Simple SMTP VRFY check (some servers block this)
+        for mx in mx_hosts:
+            try:
+                server = smtplib.SMTP(timeout=5)
+                server.connect(mx)
+                server.helo()
+                code, _ = server.mail("test@" + domain)
+                server.quit()
+                if code == 250:
+                    return True
+            except:
+                continue
+        return True if mx_hosts else False
     except:
         return False
 
@@ -110,25 +119,24 @@ def crawl_site(url, crawl_depth=1, max_pages=30, delay=0.5):
 # ---------------------
 st.set_page_config(page_title="Email Extractor", layout="wide")
 
+# Header
 st.markdown("""
-<div style="padding:20px; background-color:#f8f9fa; border-radius:12px; margin-bottom:20px;">
-<h1 style="color:#4B0082;">📧 Multi-Site Email Extractor</h1>
-<p style="color:#333; font-size:16px;">Enter website URLs below to extract emails. Supports multiple websites, crawling multiple pages, and optional MX verification.</p>
+<div style="padding:20px; background-color:#F6F8FA; border-radius:12px; margin-bottom:20px;">
+<h1 style="color:#1F2328;">📧 Email Extractor</h1>
+<p style="color:#333; font-size:16px;">Enter website URLs below to extract emails. </p>
 </div>
 """, unsafe_allow_html=True)
 
-# Inputs Section
+# Input
 with st.container():
     col1, col2 = st.columns([3, 1])
-
     with col1:
         urls_input = st.text_area(
             "Enter website URLs (one per line)",
-            "fusiondigital.ie\nexample.com",
-            height=150
+            height=300
         )
     with col2:
-        crawl_depth = st.slider("Crawl depth (0=homepage)", 0, 3, 1)
+        crawl_depth = st.slider("Crawl depth (0=homepage)", 0, 1, 1)
         max_pages = st.number_input("Max pages per site", 1, 200, 30)
         delay = st.number_input("Delay between requests (seconds)", 0.0, 5.0, 0.2, 0.1)
         verify_emails = st.checkbox("✅ Verify emails (MX check)", value=False)
@@ -151,19 +159,18 @@ if st.button("🚀 Extract Emails"):
         all_results = {}
         total_emails_found = 0
 
-        # Parallel crawling
-        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        with ThreadPoolExecutor(max_workers=10) as executor:
             future_to_url = {executor.submit(crawl_site, url, crawl_depth, max_pages, delay): url for url in websites}
             for future in as_completed(future_to_url):
                 url, emails = future.result()
                 if verify_emails:
-                    verified_emails = {e for e in emails if is_email_valid(e) is True}
+                    verified_emails = {e for e in emails if is_email_valid(e)}
                 else:
                     verified_emails = emails
                 all_results[url] = verified_emails
                 total_emails_found += len(verified_emails)
 
-        # Display emails per site
+        # Display emails
         st.subheader("📋 Extracted Emails per Website")
         for site, emails in all_results.items():
             if emails:
@@ -185,20 +192,13 @@ if st.button("🚀 Extract Emails"):
                 for e in sorted(emails):
                     writer.writerow([site, e, is_email_valid(e) if verify_emails else "Skipped"])
             csv_bytes = csv_buffer.getvalue().encode("utf-8")
+            st.download_button("📥 Download all emails (CSV)", csv_bytes, "emails.csv", "text/csv")
 
-            st.download_button(
-                label="📥 Download all emails (CSV)",
-                data=csv_bytes,
-                file_name="emails.csv",
-                mime="text/csv"
-            )
-
-        # Completion notification with popup & sound
+        # Notification
         st.balloons()
         st.success(f"🎉 Extraction completed! Total emails found: {total_emails_found}")
         st.info("💡 Done by Shafiq Sanchy")
 
-        # JS popup + sound
         js_code = f"""
         <script>
         function notifyMe() {{
@@ -222,3 +222,10 @@ if st.button("🚀 Extract Emails"):
         """
         import streamlit.components.v1 as components
         components.html(js_code, height=0, width=0)
+
+# Footer
+st.markdown("""
+<div style="padding:10px; background-color:#f1f1f1; border-top:1px solid #ccc; margin-top:30px; text-align:center; font-size:14px; color:#555;">
+This app is designed and developed by Shafiq Sanchy, © 2025
+</div>
+""", unsafe_allow_html=True)
