@@ -100,6 +100,9 @@ if st.button("Extract Emails"):
 
             if found_emails:
                 st.success(f"✅ Found {len(found_emails)} emails on {url}")
+import pandas as pd
+df = pd.DataFrame(sorted(found_emails), columns=["Email"])
+st.dataframe(df, height=min(300, 30 * len(found_emails)))
             else:
                 st.warning(f"No emails found on {url}")
 
