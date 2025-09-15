@@ -225,7 +225,7 @@ if st.button("🚀 Extract Emails"):
 
 # Footer
 st.markdown("""
-<div style="padding:10px; border-top:1px solid #ccc; margin-top:50px; text-align:center; font-size:14px; color:#555;">
-© Shafiq Sanchy 2025.
+<div style="padding:10px; border-top:0px solid #ccc; margin-top:50px; text-align:center; font-size:14px; color:#555;">
+© Shafiq Sanchy 2025
 </div>
 """, unsafe_allow_html=True)
