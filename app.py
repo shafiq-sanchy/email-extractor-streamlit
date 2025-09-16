@@ -332,8 +332,7 @@ if st.button("🚀 Extract Emails"):
                 }
                 unique_emails.update(cleaned)
 
-
-                # CSV download (prepared once)
+        # CSV download (prepared once)
         if unique_emails:
             csv_buffer = io.StringIO()
             writer = csv.writer(csv_buffer)
