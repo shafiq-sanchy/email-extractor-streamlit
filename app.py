@@ -332,6 +332,23 @@ if st.button("🚀 Extract Emails"):
                 }
                 unique_emails.update(cleaned)
 
+                # CSV download (prepared once)
+        if unique_emails:
+            csv_buffer = io.StringIO()
+            writer = csv.writer(csv_buffer)
+            writer.writerow(["website", "email", "verified"])
+            for site, data in all_results.items():
+                for e in data["clean"]:
+                    writer.writerow([site, e, verified_map.get(e, "Skipped")])
+            csv_bytes = csv_buffer.getvalue().encode("utf-8")
+            st.markdown("<div style='height:18px'></div>", unsafe_allow_html=True)
+            st.download_button("📥 Download all emails (CSV)", data=csv_bytes, file_name="emails.csv", mime="text/csv")
+
+        # Finish notification & branding
+        st.balloons()
+        st.success(f"🎉 Extraction completed! Unique cleaned emails: {len(unique_emails)} — Valid: {sum(1 for v in verified_map.values() if v == 'Valid')}")
+        
+        
         # show raw + cleaned per site with safe heights to avoid overlap
         st.subheader("📋 Extracted Emails per Website")
         for site, data in all_results.items():
@@ -426,23 +443,6 @@ if st.button("🚀 Extract Emails"):
             height = max(180, min(700, 32 * max(1, len(rows))))
             st.dataframe(df_final, height=height)
             st.markdown("<div style='height:12px'></div>", unsafe_allow_html=True)
-
-        # CSV download (prepared once)
-        if unique_emails:
-            csv_buffer = io.StringIO()
-            writer = csv.writer(csv_buffer)
-            writer.writerow(["website", "email", "verified"])
-            for site, data in all_results.items():
-                for e in data["clean"]:
-                    writer.writerow([site, e, verified_map.get(e, "Skipped")])
-            csv_bytes = csv_buffer.getvalue().encode("utf-8")
-            st.markdown("<div style='height:18px'></div>", unsafe_allow_html=True)
-            st.download_button("📥 Download all emails (CSV)", data=csv_bytes, file_name="emails.csv", mime="text/csv")
-
-        # Finish notification & branding
-        st.balloons()
-        st.success(f"🎉 Extraction completed! Unique cleaned emails: {len(unique_emails)} — Valid: {sum(1 for v in verified_map.values() if v == 'Valid')}")
-        st.info("💡 Done by Shafiq Sanchy")
 
         # browser notification + sound
         js_code = f"""
