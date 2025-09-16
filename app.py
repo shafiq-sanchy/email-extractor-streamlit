@@ -43,11 +43,11 @@ except Exception:
 EMAIL_REGEX = re.compile(r'[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$', re.I)
 
 # Exclude patterns and domains (customize as needed)
-EXCLUDED_KEYWORDS = ["support@", "press@", "privacy@", "no-reply@", "noreply@", "unsubscribe@"]
+EXCLUDED_KEYWORDS = ["support@", "press@", "job", "career", "yourname", "john", "example", "fraud", "scam", "privacy@", "no-reply@", "noreply@", "unsubscribe@"]
 EXCLUDED_DOMAINS_SUBSTR = [
-    "sentry", "wixpress", "sentry-next", "amazonaws", "localhost", "invalid", "example", "2x.png"
+    "sentry", "wixpress", "sentry-next", "wix", "amazonaws", "localhost", "invalid", "example", "website", "2x.png"
 ]
-SKIP_EXTENSIONS = (".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp", ".ico", ".bmp", ".pdf")
+SKIP_EXTENSIONS = (".png", ".jpg", ".jpeg", ".gif", ".svg", ".domain", "example", ".webp", ".ico", ".bmp", ".pdf")
 
 # Concurrency & requests session
 MAX_CRAWL_WORKERS = 12
@@ -288,7 +288,7 @@ st.markdown("""
 with st.container():
     col1, col2 = st.columns([3, 1])
     with col1:
-        urls_input = st.text_area("Enter website URLs (one per line)", height=220)
+        urls_input = st.text_area("Enter website URLs (one per line)", height=300)
     with col2:
         crawl_depth = st.slider("Crawl depth (0=homepage)", 0, 1, 1)
         max_pages = st.number_input("Max pages per site", 1, 200, 30)
@@ -470,7 +470,7 @@ if st.button("🚀 Extract Emails"):
 
 # footer
 st.markdown("""
-<div style="padding:12px; margin-top:32px; text-align:center; font-size:13px; color:#555; border-top:1px solid #eee;">
+<div style="padding:12px; margin-top:32px; text-align:center; font-size:13px; color:#555; border-top:0px solid #eee;">
 © Shafiq Sanchy 2025
 </div>
 """, unsafe_allow_html=True)
