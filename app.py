@@ -288,7 +288,7 @@ st.markdown("""
 with st.container():
     col1, col2 = st.columns([3, 1])
     with col1:
-        urls_input = st.text_area("Enter website URLs (one per line)", height=300)
+        urls_input = st.text_area("Enter website URLs (one per line)", height=350)
     with col2:
         crawl_depth = st.slider("Crawl depth (0=homepage)", 0, 1, 1)
         max_pages = st.number_input("Max pages per site", 1, 200, 30)
