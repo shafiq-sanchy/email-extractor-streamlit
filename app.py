@@ -333,10 +333,7 @@ if st.button("🚀 Extract Emails"):
                 unique_emails.update(cleaned)
 
 
-        
 
-        st.success(f"🎉 Extraction completed! Unique cleaned emails: {len(unique_emails)} — Valid: {sum(1 for v in verified_map.values() if v == 'Valid')}")
-        st.download_button("📥 Download all emails (CSV)", data=csv_bytes, file_name="emails.csv", mime="text/csv")
         
         
         # show raw + cleaned per site with safe heights to avoid overlap
@@ -444,10 +441,11 @@ if st.button("🚀 Extract Emails"):
                     writer.writerow([site, e, verified_map.get(e, "Skipped")])
             csv_bytes = csv_buffer.getvalue().encode("utf-8")
             st.markdown("<div style='height:18px'></div>", unsafe_allow_html=True)
-            
+            st.download_button("📥 Download all emails (CSV)", data=csv_bytes, file_name="emails.csv", mime="text/csv")
 
         # Finish notification & branding
         st.balloons()
+        st.success(f"🎉 Extraction completed! Unique cleaned emails: {len(unique_emails)} — Valid: {sum(1 for v in verified_map.values() if v == 'Valid')}")
         st.info("💡 Done by Shafiq Sanchy")
 
         # browser notification + sound
