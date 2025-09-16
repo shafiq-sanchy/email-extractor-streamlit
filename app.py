@@ -43,11 +43,11 @@ except Exception:
 EMAIL_REGEX = re.compile(r'[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$', re.I)
 
 # Exclude patterns and domains (customize as needed)
-EXCLUDED_KEYWORDS = ["support@", "press@", "job", "career", "yourname", "john", "example", "fraud", "scam", "privacy@", "no-reply@", "noreply@", "unsubscribe@"]
+EXCLUDED_KEYWORDS = ["support@", "account", "filter", "team", "hr", "enquiries", "press@", "job", "career", "sales", "inquiry", "yourname", "john", "example", "fraud", "scam", "privacy@", "no-reply@", "noreply@", "unsubscribe@"]
 EXCLUDED_DOMAINS_SUBSTR = [
-    "sentry", "wixpress", "sentry-next", "wix", "amazonaws", "localhost", "invalid", "example", "website", "2x.png"
+    "sentry", "wixpress", "sentry.wixpress.com", "latofonts", "address", "yourdomain", "err.abtm.io", "sentry-next", "wix", "mysite", "yoursite", "amazonaws", "localhost", "invalid", "example", "website", "2x.png"
 ]
-SKIP_EXTENSIONS = (".png", ".jpg", ".jpeg", ".gif", ".svg", ".domain", "example", ".webp", ".ico", ".bmp", ".pdf")
+SKIP_EXTENSIONS = (".png", ".jpg", ".jpeg", "email.com", "the.benhawy", ".gif", ".svg", ".domain", "example", ".webp", ".ico", ".bmp", ".pdf")
 
 # Concurrency & requests session
 MAX_CRAWL_WORKERS = 12
