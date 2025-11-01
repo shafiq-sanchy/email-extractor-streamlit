@@ -1,23 +1,20 @@
 # app.py
 """
-Email Extractor - Optimized for Speed & Large Scale
+Email Extractor - Debug & Fixed Version
 
-Features:
-- Ultra-fast parallel crawling (1000+ URLs supported)
-- Deep crawling (hidden pages, forms, mailto links)
-- Smart error handling (individual failures won't stop the process)
-- Real browser User-Agent to avoid blocking
-- Session state for result persistence
-- Easy copy and CSV download
-- No verification (for maximum speed)
+Fixed Issues:
+- BeautifulSoup parser changed to 'lxml' for better compatibility
+- More aggressive email extraction
+- Better crawling of contact/about pages
+- Debug mode to see what's happening
+- Fallback methods for email extraction
 """
 
 import re
 import io
 import csv
 import time
-from functools import lru_cache
-from urllib.parse import urljoin, urlparse, parse_qs
+from urllib.parse import urljoin, urlparse
 
 import requests
 from bs4 import BeautifulSoup
@@ -31,21 +28,22 @@ from urllib3.util.retry import Retry
 # -----------------------
 # Configuration
 # -----------------------
-EMAIL_REGEX = re.compile(r'[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$', re.I)
+# More permissive email regex
+EMAIL_REGEX = re.compile(r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b', re.I)
 
-EXCLUDED_KEYWORDS = ["support@", "account", "filter", "team", "hr", "enquiries", "press@", "job", "career", "sales", "inquiry", "yourname", "john", "example", "fraud", "scam", "privacy@", "no-reply@", "noreply@", "unsubscribe@"]
+EXCLUDED_KEYWORDS = ["example@", "test@", "sample@", "admin@example", "user@example", "name@example"]
 EXCLUDED_DOMAINS_SUBSTR = [
-    "sentry", "wixpress", "sentry.wixpress.com", "latofonts", "address", "yourdomain", "err.abtm.io", "sentry-next", "wix", "mysite", "yoursite", "amazonaws", "localhost", "invalid", "example", "website", "2x.png"
+    "example.com", "example.org", "domain.com", "yourdomain", "yoursite", "mysite", "sentry.io", "wixpress", "amazonaws"
 ]
-SKIP_EXTENSIONS = (".png", ".jpg", ".jpeg", "email.com", "the.benhawy", ".gif", ".svg", ".domain", "example", ".webp", ".ico", ".bmp", ".pdf")
+SKIP_EXTENSIONS = (".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp", ".ico", ".bmp", ".pdf", ".js", ".css")
 
-# Performance optimization for large scale
-MAX_CRAWL_WORKERS = 20      # Increased for faster processing
-BATCH_SIZE = 50             # Process 50 URLs at a time
-REQUEST_TIMEOUT = 8         # Reduced timeout for faster failure detection
-MAX_RETRIES = 1             # Minimal retries for speed
+# Performance settings
+MAX_CRAWL_WORKERS = 15
+BATCH_SIZE = 50
+REQUEST_TIMEOUT = 10
+MAX_RETRIES = 2
 
-# Realistic browser headers to avoid blocking
+# Browser-like headers
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
@@ -53,15 +51,17 @@ HEADERS = {
     "Accept-Encoding": "gzip, deflate, br",
     "DNT": "1",
     "Connection": "keep-alive",
-    "Upgrade-Insecure-Requests": "1"
+    "Upgrade-Insecure-Requests": "1",
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "none"
 }
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-# Session with retry strategy
 session = requests.Session()
-retries = Retry(total=MAX_RETRIES, backoff_factor=0.1, status_forcelist=[500, 502, 503, 504])
-adapter = HTTPAdapter(max_retries=retries, pool_connections=100, pool_maxsize=100)
+retries = Retry(total=MAX_RETRIES, backoff_factor=0.3, status_forcelist=[429, 500, 502, 503, 504])
+adapter = HTTPAdapter(max_retries=retries, pool_connections=50, pool_maxsize=50)
 session.mount("http://", adapter)
 session.mount("https://", adapter)
 
@@ -69,7 +69,6 @@ session.mount("https://", adapter)
 # Utility Functions
 # -----------------------
 def normalize_url(url: str) -> str | None:
-    """Normalize and validate URL"""
     if not url:
         return None
     url = url.strip()
@@ -79,137 +78,144 @@ def normalize_url(url: str) -> str | None:
         url = "https://" + url
     return url
 
-HEX_GARBAGE_RE = re.compile(r'^[0-9a-f]{16,}$', re.I)
-
 def looks_like_garbage(email: str) -> bool:
-    """Filter out invalid/garbage emails"""
-    if not email or " " in email:
+    """Minimal filtering - only obvious garbage"""
+    if not email or " " in email or len(email) < 6:
         return True
+    
     e = email.strip().lower()
-
-    if EMAIL_REGEX.fullmatch(e) is None:
+    
+    # Basic structure check
+    if "@" not in e or e.count("@") != 1:
         return True
-
+    
     try:
         local, domain = e.split("@", 1)
     except ValueError:
         return True
-
-    # Skip file extensions
-    if any(domain.endswith(ext.lstrip(".")) or domain.endswith(ext) for ext in SKIP_EXTENSIONS):
+    
+    # Must have at least one dot in domain
+    if "." not in domain:
         return True
-
-    # Skip hex garbage (system IDs)
-    if HEX_GARBAGE_RE.fullmatch(local):
+    
+    # Check for file extensions in domain
+    domain_lower = domain.lower()
+    if any(domain_lower.endswith(ext) for ext in SKIP_EXTENSIONS):
         return True
-
-    # Skip noisy domains
+    
+    # Check excluded domains
     for sub in EXCLUDED_DOMAINS_SUBSTR:
-        if sub in domain:
+        if sub in domain_lower:
             return True
-
-    # Skip excluded keywords
+    
+    # Check excluded keywords
     for kw in EXCLUDED_KEYWORDS:
         if kw in e:
             return True
-
+    
     return False
 
-def extract_emails_from_html(html: str, url: str = "") -> set:
-    """
-    Deep email extraction from HTML:
-    - Text content (regex)
-    - Mailto links
-    - Form action attributes
-    - JavaScript variables
-    - Hidden input values
-    - Meta tags
-    """
+def extract_emails_from_text(text: str) -> set:
+    """Extract all emails from raw text using regex"""
+    if not text:
+        return set()
+    
     found = set()
-    if not html:
-        return found
+    matches = EMAIL_REGEX.findall(text)
     
-    # 1. Regex extraction from text
-    for m in EMAIL_REGEX.findall(html):
-        found.add(m.lower())
-    
-    try:
-        soup = BeautifulSoup(html, "html.parser")
-        
-        # 2. Mailto links
-        for a in soup.find_all("a", href=True):
-            href = a["href"]
-            if href.lower().startswith("mailto:"):
-                email = href.split("mailto:", 1)[1].split("?")[0].strip().lower()
-                if email:
-                    found.add(email)
-        
-        # 3. Form actions (some sites hide emails in form actions)
-        for form in soup.find_all("form", action=True):
-            action = form["action"]
-            emails_in_action = EMAIL_REGEX.findall(action)
-            for e in emails_in_action:
-                found.add(e.lower())
-        
-        # 4. Input fields with email type or value
-        for inp in soup.find_all("input"):
-            # Check value attribute
-            if inp.get("value"):
-                emails_in_value = EMAIL_REGEX.findall(inp["value"])
-                for e in emails_in_value:
-                    found.add(e.lower())
-            # Check placeholder
-            if inp.get("placeholder"):
-                emails_in_placeholder = EMAIL_REGEX.findall(inp["placeholder"])
-                for e in emails_in_placeholder:
-                    found.add(e.lower())
-        
-        # 5. Meta tags (some sites put contact info in meta)
-        for meta in soup.find_all("meta"):
-            content = meta.get("content", "")
-            emails_in_meta = EMAIL_REGEX.findall(content)
-            for e in emails_in_meta:
-                found.add(e.lower())
-        
-        # 6. Script tags (emails in JavaScript)
-        for script in soup.find_all("script"):
-            if script.string:
-                emails_in_js = EMAIL_REGEX.findall(script.string)
-                for e in emails_in_js:
-                    found.add(e.lower())
-        
-        # 7. Comments (sometimes emails are in HTML comments)
-        for comment in soup.find_all(string=lambda text: isinstance(text, str)):
-            emails_in_comment = EMAIL_REGEX.findall(str(comment))
-            for e in emails_in_comment:
-                found.add(e.lower())
-                
-    except Exception as e:
-        # Log but don't fail
-        pass
+    for match in matches:
+        email = match.strip().lower()
+        if email and not looks_like_garbage(email):
+            found.add(email)
     
     return found
 
-# -----------------------
-# Crawling with Deep Search
-# -----------------------
-def crawl_site(url: str, crawl_depth: int = 2, max_pages: int = 50, delay: float = 0.1) -> dict:
+def extract_emails_from_html(html: str, url: str = "") -> dict:
     """
-    Crawl website and extract emails with error handling
-    Returns: {
-        'url': original_url,
-        'status': 'success' or 'error',
-        'emails': set of emails,
-        'pages_crawled': count,
-        'error_message': if error occurred
+    Extract emails using multiple methods
+    Returns dict with method names and emails found
+    """
+    results = {
+        'text_regex': set(),
+        'mailto_links': set(),
+        'visible_text': set(),
+        'meta_tags': set(),
+        'all_attributes': set()
     }
-    """
+    
+    if not html:
+        return results
+    
+    # Method 1: Direct regex on HTML source
+    results['text_regex'] = extract_emails_from_text(html)
+    
+    try:
+        # Try lxml parser first (faster and better), fallback to html.parser
+        try:
+            soup = BeautifulSoup(html, "lxml")
+        except:
+            soup = BeautifulSoup(html, "html.parser")
+        
+        # Method 2: Mailto links
+        for a in soup.find_all("a", href=True):
+            href = a["href"]
+            if "mailto:" in href.lower():
+                email = href.lower().replace("mailto:", "").split("?")[0].strip()
+                if email and not looks_like_garbage(email):
+                    results['mailto_links'].add(email)
+        
+        # Method 3: All visible text
+        visible_text = soup.get_text(separator=" ", strip=True)
+        results['visible_text'] = extract_emails_from_text(visible_text)
+        
+        # Method 4: Meta tags
+        for meta in soup.find_all("meta"):
+            content = meta.get("content", "")
+            if content:
+                results['meta_tags'].update(extract_emails_from_text(content))
+        
+        # Method 5: All tag attributes (href, value, placeholder, data-*, etc)
+        for tag in soup.find_all(True):
+            for attr_name, attr_value in tag.attrs.items():
+                if isinstance(attr_value, str):
+                    results['all_attributes'].update(extract_emails_from_text(attr_value))
+                elif isinstance(attr_value, list):
+                    for val in attr_value:
+                        if isinstance(val, str):
+                            results['all_attributes'].update(extract_emails_from_text(val))
+    
+    except Exception as e:
+        # If parsing fails, at least we have regex results
+        pass
+    
+    return results
+
+def should_crawl_url(url: str, base_url: str) -> bool:
+    """Determine if URL should be crawled - prioritize contact/about pages"""
+    url_lower = url.lower()
+    
+    # Priority pages that likely have emails
+    priority_keywords = ['contact', 'about', 'team', 'people', 'staff', 'reach', 'touch']
+    
+    for keyword in priority_keywords:
+        if keyword in url_lower:
+            return True
+    
+    return True
+
+# -----------------------
+# Crawling Function
+# -----------------------
+def crawl_site(url: str, crawl_depth: int = 2, max_pages: int = 50, delay: float = 0.15) -> dict:
+    """Crawl website and extract emails"""
     result = {
         'url': url,
         'status': 'error',
         'emails': set(),
         'pages_crawled': 0,
-        'error_message': None
+        'pages_found': [],
+        'error_message': None,
+        'extraction_methods': {}
     }
     
     try:
@@ -217,80 +223,115 @@ def crawl_site(url: str, crawl_depth: int = 2, max_pages: int = 50, delay: float
         base_domain = parsed.netloc
         
         if not base_domain:
-            result['error_message'] = "Invalid URL format"
+            result['error_message'] = "Invalid URL"
             return result
         
+        # Prioritize certain pages
         to_visit = [(url, 0)]
         seen = set([url])
-        found = set()
-        pages = 0
-
-        while to_visit and pages < max_pages:
+        
+        # Try to add common contact pages
+        potential_pages = [
+            url.rstrip('/') + '/contact',
+            url.rstrip('/') + '/contact-us',
+            url.rstrip('/') + '/about',
+            url.rstrip('/') + '/about-us',
+            url.rstrip('/') + '/team',
+            url.rstrip('/') + '/reach-us'
+        ]
+        
+        for page in potential_pages:
+            if page not in seen:
+                to_visit.append((page, 0))
+                seen.add(page)
+        
+        found_emails = set()
+        pages_crawled = 0
+        pages_list = []
+        
+        while to_visit and pages_crawled < max_pages:
             current, depth = to_visit.pop(0)
-            pages += 1
             
             try:
-                r = session.get(current, headers=HEADERS, timeout=REQUEST_TIMEOUT, verify=False)
+                r = session.get(current, headers=HEADERS, timeout=REQUEST_TIMEOUT, verify=False, allow_redirects=True)
+                
+                if r.status_code != 200:
+                    continue
+                
                 html = r.text
+                pages_crawled += 1
+                pages_list.append(current)
                 
-                # Extract emails from this page
-                found.update(extract_emails_from_html(html, current))
+                # Extract emails using all methods
+                extraction = extract_emails_from_html(html, current)
                 
-                # Only continue crawling if within depth limit
+                # Combine all methods
+                page_emails = set()
+                for method, emails in extraction.items():
+                    page_emails.update(emails)
+                    if emails:
+                        if method not in result['extraction_methods']:
+                            result['extraction_methods'][method] = 0
+                        result['extraction_methods'][method] += len(emails)
+                
+                found_emails.update(page_emails)
+                
+                # Continue crawling if within depth
                 if depth < crawl_depth:
                     try:
-                        soup = BeautifulSoup(html, "html.parser")
+                        soup = BeautifulSoup(html, "lxml") if "lxml" else BeautifulSoup(html, "html.parser")
                         
-                        # Find all links
                         for a in soup.find_all("a", href=True):
                             href = a["href"].strip()
                             
-                            # Skip javascript, mailto, tel, etc
-                            if href.startswith(("javascript:", "mailto:", "tel:", "#")):
+                            if href.startswith(("javascript:", "mailto:", "tel:", "#", "data:")):
                                 continue
                             
-                            joined = urljoin(current, href)
-                            p = urlparse(joined)
-                            
-                            # Only same domain
-                            if p.scheme not in ("http", "https"):
+                            try:
+                                joined = urljoin(current, href)
+                                p = urlparse(joined)
+                                
+                                if p.scheme not in ("http", "https"):
+                                    continue
+                                if p.netloc != base_domain:
+                                    continue
+                                
+                                # Remove query params and fragments for uniqueness
+                                norm = f"{p.scheme}://{p.netloc}{p.path}".rstrip('/')
+                                
+                                if norm and norm not in seen and len(seen) < max_pages * 2:
+                                    seen.add(norm)
+                                    # Prioritize contact pages
+                                    if should_crawl_url(norm, url):
+                                        to_visit.insert(0, (norm, depth + 1))
+                                    else:
+                                        to_visit.append((norm, depth + 1))
+                            except:
                                 continue
-                            if p.netloc != base_domain:
-                                continue
-                            
-                            # Normalize (remove fragments)
-                            norm = p._replace(fragment="").geturl()
-                            
-                            if norm not in seen:
-                                seen.add(norm)
-                                to_visit.append((norm, depth + 1))
-                    except Exception:
+                    except:
                         pass
                 
-                # Small delay to be polite
                 if delay > 0:
                     time.sleep(delay)
                     
             except requests.exceptions.Timeout:
-                result['error_message'] = f"Timeout on page {pages}"
                 continue
-            except requests.exceptions.ConnectionError:
-                result['error_message'] = f"Connection error on page {pages}"
+            except requests.exceptions.RequestException:
                 continue
-            except Exception as e:
-                result['error_message'] = f"Error on page {pages}: {str(e)[:50]}"
+            except Exception:
                 continue
         
-        result['status'] = 'success' if found else 'no_emails'
-        result['emails'] = found
-        result['pages_crawled'] = pages
+        result['status'] = 'success' if found_emails else 'no_emails'
+        result['emails'] = found_emails
+        result['pages_crawled'] = pages_crawled
+        result['pages_found'] = pages_list[:10]  # Keep first 10 for display
         
-        if not found and not result['error_message']:
-            result['error_message'] = "No emails found"
+        if not found_emails:
+            result['error_message'] = f"No emails found (crawled {pages_crawled} pages)"
             
     except Exception as e:
         result['status'] = 'error'
-        result['error_message'] = str(e)[:100]
+        result['error_message'] = str(e)[:150]
     
     return result
 
@@ -303,10 +344,8 @@ if 'all_results' not in st.session_state:
     st.session_state.all_results = {}
 if 'unique_emails' not in st.session_state:
     st.session_state.unique_emails = set()
-if 'total_pages_crawled' not in st.session_state:
-    st.session_state.total_pages_crawled = 0
-if 'failed_urls' not in st.session_state:
-    st.session_state.failed_urls = []
+if 'debug_mode' not in st.session_state:
+    st.session_state.debug_mode = False
 
 # -----------------------
 # Streamlit UI
@@ -315,84 +354,70 @@ st.set_page_config(page_title="Email Extractor Pro", layout="wide")
 
 st.markdown("""
 <div style="margin-bottom:12px;">
-  <h1 style="color:#1F2328;">📧 Email Extractor Pro</h1>
-  <p style="color:#333; font-size:14px;">Ultra-fast email extraction from unlimited websites. Deep crawling with smart error handling.</p>
+  <h1 style="color:#1F2328;">📧 Email Extractor Pro (Fixed)</h1>
+  <p style="color:#333; font-size:14px;">Fixed email extraction with better parsing and multiple detection methods.</p>
 </div>
 """, unsafe_allow_html=True)
 
 with st.container():
     col1, col2 = st.columns([3, 1])
     with col1:
-        urls_input = st.text_area("Enter website URLs (one per line) - Supports 1000+ URLs", height=350)
+        urls_input = st.text_area("Enter website URLs (one per line)", height=350, placeholder="https://example.com\nhttps://another-site.com")
     with col2:
-        crawl_depth = st.slider("Crawl depth", 0, 3, 2, help="0=Homepage only, 1=Homepage + direct links, 2-3=Deeper pages")
-        max_pages = st.number_input("Max pages per site", 1, 200, 50, help="More pages = more emails but slower")
-        delay = st.number_input("Delay (seconds)", 0.0, 2.0, 0.1, 0.05, help="Delay between requests (0.1 is good)")
+        crawl_depth = st.slider("Crawl depth", 0, 3, 2, help="Higher = more pages crawled")
+        max_pages = st.number_input("Max pages per site", 5, 200, 50)
+        delay = st.number_input("Delay (seconds)", 0.0, 2.0, 0.15, 0.05)
+        debug_mode = st.checkbox("Debug mode", value=False, help="Show detailed extraction info")
         
-        st.markdown("### ⚡ Performance")
-        st.markdown(f"- **Workers**: {MAX_CRAWL_WORKERS}")
-        st.markdown(f"- **Batch Size**: {BATCH_SIZE}")
-        st.markdown(f"- **Timeout**: {REQUEST_TIMEOUT}s")
+        st.markdown("### ⚙️ Settings")
+        st.markdown(f"- Workers: {MAX_CRAWL_WORKERS}")
+        st.markdown(f"- Batch: {BATCH_SIZE}")
+        st.markdown(f"- Timeout: {REQUEST_TIMEOUT}s")
 
 st.markdown("---")
 
-col_btn1, col_btn2 = st.columns([1, 5])
-with col_btn1:
-    extract_button = st.button("🚀 Extract Emails", use_container_width=True)
-with col_btn2:
+col1, col2 = st.columns([1, 5])
+with col1:
+    extract_btn = st.button("🚀 Extract", use_container_width=True)
+with col2:
     if st.session_state.results_ready:
-        if st.button("🔄 Clear & Start Fresh", use_container_width=True):
+        if st.button("🔄 Clear", use_container_width=True):
             st.session_state.results_ready = False
             st.session_state.all_results = {}
             st.session_state.unique_emails = set()
-            st.session_state.total_pages_crawled = 0
-            st.session_state.failed_urls = []
             st.rerun()
 
-if extract_button:
-    # Reset
+if extract_btn:
     st.session_state.results_ready = False
     st.session_state.all_results = {}
     st.session_state.unique_emails = set()
-    st.session_state.total_pages_crawled = 0
-    st.session_state.failed_urls = []
+    st.session_state.debug_mode = debug_mode
     
-    # Parse URLs
-    websites = []
-    for line in urls_input.splitlines():
-        n = normalize_url(line)
-        if n:
-            websites.append(n)
-
+    websites = [normalize_url(line) for line in urls_input.splitlines() if normalize_url(line)]
+    
     if not websites:
-        st.warning("⚠️ Please enter at least one URL.")
+        st.warning("⚠️ Please enter at least one URL")
     else:
-        total_sites = len(websites)
-        st.success(f"🎯 Processing **{total_sites}** websites...")
+        total = len(websites)
+        st.info(f"🎯 Processing {total} websites...")
         
-        # Progress tracking
-        progress_bar = st.progress(0)
-        status_text = st.empty()
-        metrics_col1, metrics_col2, metrics_col3, metrics_col4 = st.columns(4)
+        progress = st.progress(0)
+        status = st.empty()
+        
+        metrics_col1, metrics_col2, metrics_col3 = st.columns(3)
         
         all_results = {}
         unique_emails = set()
-        total_pages = 0
-        failed_urls = []
-        
         completed = 0
-        start_time = time.time()
+        start = time.time()
         
         # Process in batches
-        for batch_start in range(0, total_sites, BATCH_SIZE):
-            batch_end = min(batch_start + BATCH_SIZE, total_sites)
+        for batch_start in range(0, total, BATCH_SIZE):
+            batch_end = min(batch_start + BATCH_SIZE, total)
             batch = websites[batch_start:batch_end]
-            batch_num = (batch_start // BATCH_SIZE) + 1
-            total_batches = (total_sites + BATCH_SIZE - 1) // BATCH_SIZE
             
-            status_text.markdown(f"⚙️ **Batch {batch_num}/{total_batches}** | Processing {len(batch)} sites...")
+            status.markdown(f"⚙️ Batch {batch_start//BATCH_SIZE + 1}/{(total+BATCH_SIZE-1)//BATCH_SIZE}")
             
-            # Parallel crawling
             with ThreadPoolExecutor(max_workers=MAX_CRAWL_WORKERS) as executor:
                 futures = {executor.submit(crawl_site, url, crawl_depth, max_pages, delay): url for url in batch}
                 
@@ -401,64 +426,43 @@ if extract_button:
                     try:
                         result = fut.result()
                         
-                        # Filter garbage emails
-                        raw_emails = result['emails']
-                        cleaned = {e for e in raw_emails if not looks_like_garbage(e)}
-                        cleaned = {e for e in cleaned if not any(k in e for k in EXCLUDED_KEYWORDS)}
-                        
                         all_results[url] = {
                             "status": result['status'],
-                            "raw": sorted(raw_emails),
-                            "clean": sorted(cleaned),
+                            "emails": sorted(result['emails']),
                             "pages": result['pages_crawled'],
-                            "error": result.get('error_message')
+                            "pages_list": result['pages_found'],
+                            "error": result.get('error_message'),
+                            "methods": result.get('extraction_methods', {})
                         }
                         
-                        unique_emails.update(cleaned)
-                        total_pages += result['pages_crawled']
-                        
-                        if result['status'] == 'error':
-                            failed_urls.append((url, result.get('error_message', 'Unknown error')))
+                        unique_emails.update(result['emails'])
                         
                     except Exception as e:
                         all_results[url] = {
                             "status": "error",
-                            "raw": [],
-                            "clean": [],
+                            "emails": [],
                             "pages": 0,
-                            "error": str(e)[:100]
+                            "pages_list": [],
+                            "error": str(e)[:100],
+                            "methods": {}
                         }
-                        failed_urls.append((url, str(e)[:100]))
                     
                     completed += 1
-                    progress = completed / total_sites
-                    progress_bar.progress(progress)
+                    progress.progress(completed / total)
                     
-                    # Real-time metrics
-                    elapsed = time.time() - start_time
-                    rate = completed / elapsed if elapsed > 0 else 0
-                    eta = (total_sites - completed) / rate if rate > 0 else 0
-                    
-                    metrics_col1.metric("✅ Completed", f"{completed}/{total_sites}")
-                    metrics_col2.metric("📧 Emails Found", len(unique_emails))
-                    metrics_col3.metric("📄 Pages Crawled", total_pages)
-                    metrics_col4.metric("⚡ Speed", f"{rate:.1f} sites/sec")
-                    
-                    status_text.markdown(f"⏱️ **ETA**: ~{int(eta)}s | **Success**: {completed - len(failed_urls)} | **Errors**: {len(failed_urls)}")
+                    metrics_col1.metric("✅ Done", f"{completed}/{total}")
+                    metrics_col2.metric("📧 Emails", len(unique_emails))
+                    metrics_col3.metric("⚡ Speed", f"{completed/(time.time()-start):.1f}/s")
         
-        # Completion
-        progress_bar.progress(1.0)
-        elapsed_total = time.time() - start_time
+        progress.progress(1.0)
+        elapsed = time.time() - start
         
-        # Save to session
         st.session_state.all_results = all_results
         st.session_state.unique_emails = unique_emails
-        st.session_state.total_pages_crawled = total_pages
-        st.session_state.failed_urls = failed_urls
         st.session_state.results_ready = True
         
         st.balloons()
-        st.success(f"🎉 **Completed in {elapsed_total:.1f}s!** Found **{len(unique_emails)}** unique emails from **{total_pages}** pages!")
+        st.success(f"✅ Done in {elapsed:.1f}s! Found {len(unique_emails)} emails")
 
 # -----------------------
 # Display Results
@@ -466,94 +470,104 @@ if extract_button:
 if st.session_state.results_ready:
     all_results = st.session_state.all_results
     unique_emails = st.session_state.unique_emails
-    total_pages = st.session_state.total_pages_crawled
-    failed_urls = st.session_state.failed_urls
+    debug_mode = st.session_state.debug_mode
     
     st.markdown("---")
     
-    # Summary metrics
-    col1, col2, col3, col4 = st.columns(4)
-    col1.metric("🌐 Websites Processed", len(all_results))
+    # Summary
+    col1, col2, col3 = st.columns(3)
+    col1.metric("🌐 Sites", len(all_results))
     col2.metric("📧 Unique Emails", len(unique_emails))
-    col3.metric("📄 Total Pages Crawled", total_pages)
-    col4.metric("❌ Failed URLs", len(failed_urls))
+    col3.metric("📄 Total Pages", sum(r['pages'] for r in all_results.values()))
     
-    # Quick Actions
-    st.markdown("### 🎯 Quick Actions")
+    # Download options
+    st.markdown("### 📥 Download Results")
     col1, col2, col3 = st.columns(3)
     
     with col1:
         if unique_emails:
-            emails_text = "\n".join(sorted(unique_emails))
-            st.download_button(
-                "📥 Download Emails (TXT)",
-                data=emails_text,
-                file_name="emails.txt",
-                mime="text/plain",
-                use_container_width=True
-            )
+            txt = "\n".join(sorted(unique_emails))
+            st.download_button("📄 TXT File", txt, "emails.txt", "text/plain", use_container_width=True)
     
     with col2:
         if unique_emails:
-            # CSV with website mapping
-            csv_buffer = io.StringIO()
-            writer = csv.writer(csv_buffer)
-            writer.writerow(["website", "email", "status", "pages_crawled"])
+            csv_buf = io.StringIO()
+            writer = csv.writer(csv_buf)
+            writer.writerow(["website", "email", "status", "pages"])
             for site, data in all_results.items():
-                for e in data["clean"]:
-                    writer.writerow([site, e, data["status"], data["pages"]])
-            csv_bytes = csv_buffer.getvalue().encode("utf-8")
+                for email in data["emails"]:
+                    writer.writerow([site, email, data["status"], data["pages"]])
             
-            st.download_button(
-                "📥 Download Detailed CSV",
-                data=csv_bytes,
-                file_name="emails_detailed.csv",
-                mime="text/csv",
-                use_container_width=True
-            )
+            st.download_button("📊 CSV File", csv_buf.getvalue(), "emails.csv", "text/csv", use_container_width=True)
     
     with col3:
         if unique_emails:
-            # Copy to clipboard text
-            st.text_area("📋 Copy All Emails", value=emails_text, height=100, key="copy_emails")
+            st.text_area("📋 Copy Emails", "\n".join(sorted(unique_emails)), height=100)
     
-    # Detailed Results
+    # Detailed results
     st.markdown("---")
     st.subheader("📊 Detailed Results")
     
-    # Tabs for different views
-    tab1, tab2, tab3 = st.tabs(["✅ All Emails", "🌐 By Website", "❌ Errors"])
+    tab1, tab2, tab3 = st.tabs(["✅ All Emails", "🌐 By Website", "🔍 Debug Info" if debug_mode else "ℹ️ Info"])
     
     with tab1:
         if unique_emails:
-            df_all = pd.DataFrame({"Email": sorted(unique_emails)})
-            st.dataframe(df_all, height=400, use_container_width=True)
+            df = pd.DataFrame({"Email": sorted(unique_emails)})
+            st.dataframe(df, height=400, use_container_width=True)
         else:
-            st.warning("No emails found.")
+            st.warning("⚠️ No emails found")
     
     with tab2:
+        success_count = sum(1 for r in all_results.values() if r['emails'])
+        st.info(f"📊 {success_count}/{len(all_results)} sites had emails")
+        
         for site, data in all_results.items():
-            status_icon = "✅" if data["status"] == "success" else "⚠️" if data["status"] == "no_emails" else "❌"
-            with st.expander(f"{status_icon} {site} ({len(data['clean'])} emails, {data['pages']} pages)"):
-                if data["clean"]:
-                    df_site = pd.DataFrame({"Email": data["clean"]})
-                    st.dataframe(df_site, height=min(300, 40 * len(data["clean"])))
+            icon = "✅" if data['emails'] else "⚠️"
+            with st.expander(f"{icon} {site} ({len(data['emails'])} emails, {data['pages']} pages)"):
+                if data['emails']:
+                    st.write("**Emails found:**")
+                    for email in data['emails']:
+                        st.code(email)
+                    
+                    if debug_mode and data['methods']:
+                        st.write("**Extraction methods:**")
+                        for method, count in data['methods'].items():
+                            st.write(f"- {method}: {count} emails")
+                    
+                    if debug_mode and data['pages_list']:
+                        st.write("**Pages crawled:**")
+                        for page in data['pages_list'][:5]:
+                            st.write(f"- {page}")
                 else:
-                    st.info(f"No emails found. {data.get('error', '')}")
+                    st.warning(f"No emails found. {data.get('error', '')}")
     
     with tab3:
-        if failed_urls:
-            st.warning(f"⚠️ {len(failed_urls)} URLs failed to process:")
-            df_errors = pd.DataFrame(failed_urls, columns=["URL", "Error"])
-            st.dataframe(df_errors, height=400, use_container_width=True)
+        if debug_mode:
+            st.markdown("### 🔍 Debug Information")
+            
+            total_methods = {}
+            for data in all_results.values():
+                for method, count in data.get('methods', {}).items():
+                    total_methods[method] = total_methods.get(method, 0) + count
+            
+            if total_methods:
+                st.write("**Email extraction method effectiveness:**")
+                for method, count in sorted(total_methods.items(), key=lambda x: x[1], reverse=True):
+                    st.write(f"- {method}: {count} emails")
+            
+            failed = [url for url, data in all_results.items() if not data['emails']]
+            if failed:
+                st.warning(f"⚠️ {len(failed)} sites with no emails:")
+                for url in failed[:10]:
+                    st.write(f"- {url}")
         else:
-            st.success("✅ All URLs processed successfully!")
+            st.info("💡 Enable 'Debug mode' to see detailed extraction information")
     
-    st.info("💡 Done by Shafiq Sanchy")
+    st.markdown("---")
+    st.info("💡 Created by Shafiq Sanchy")
 
-# Footer
 st.markdown("""
 <div style="padding:12px; margin-top:32px; text-align:center; font-size:13px; color:#555; border-top:1px solid #eee;">
-© Shafiq Sanchy 2025 | Email Extractor Pro v2.0
+© Shafiq Sanchy 2025 | Email Extractor Pro v2.1 (Fixed)
 </div>
 """, unsafe_allow_html=True)
