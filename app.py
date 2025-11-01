@@ -18,7 +18,7 @@ CONTACT_KEYWORDS = [
     'contacto', 'kontak', 'hubungi', 'liên hệ', '연락처', 'お問い合わせ'
 ]
 SKIP_PATH_KEYWORDS = ['blog', 'post', 'article', 'news', 'tag', 'category', 'product', 'shop']
-MAX_URLS_PER_DOMAIN = 25 
+DEFAULT_MAX_URLS_PER_DOMAIN = 30 
 MAX_QUEUE_SIZE_PER_DOMAIN = 30
 BATCH_SIZE = 20
 
@@ -52,7 +52,7 @@ def initialize_session_state():
         'is_running': False, 'stop_extraction': False, 'extraction_complete': False, 'result_file_id': None,
         'urls_to_visit': set(), 'visited_urls': set(), 'all_emails': set(),
         'failed_urls': [], 'timeout_urls': [], 'domain_visit_counts': {}, 'processed_count': 0, 'total_urls_found': 0,
-        'debug_mode': False, 'stopped_due_to_limit': False
+        'debug_mode': False
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -110,9 +110,23 @@ async def scrape_and_extract_emails(session, url, depth, smart_crawl, ignore_que
                         email = href.replace('mailto:', '').split('?')[0].strip()
                         found_emails.add(email)
                 
+                for a_tag in soup.find_all('a'):
+                    link_text = a_tag.get_text()
+                    emails_in_text = re.findall(r'\b[a-zA-Z][a-zA-Z0-9._%+-]*@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}\b', link_text)
+                    found_emails.update(emails_in_text)
+
                 page_text = soup.get_text() + " ".join([tag.string for tag in soup.find_all('script') if tag.string])
                 emails_in_text = re.findall(r'\b[a-zA-Z][a-zA-Z0-9._%+-]*@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}\b', page_text)
                 found_emails.update(emails_in_text)
+
+                for form in soup.find_all('form'):
+                    action = form.get('action', '')
+                    emails_in_action = re.findall(r'\b[a-zA-Z][a-zA-Z0-9._%+-]*@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}\b', action)
+                    found_emails.update(emails_in_action)
+                    for input_tag in form.find_all('input', type='hidden'):
+                        value = input_tag.get('value', '')
+                        emails_in_value = re.findall(r'\b[a-zA-Z][a-zA-Z0-9._%+-]*@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}\b', value)
+                        found_emails.update(emails_in_value)
 
                 if depth > 0:
                     base_domain = urlparse(url).netloc
@@ -129,7 +143,7 @@ async def scrape_and_extract_emails(session, url, depth, smart_crawl, ignore_que
                             re.search(r'\.(pdf|jpg|png|zip|doc|xls|css|js|xml)$', normalized_link, re.IGNORECASE) or
                             normalized_link.startswith('tel:') or normalized_link.startswith('javascript:') or normalized_link == '#' or
                             any(keyword in parsed_link.path.lower() for keyword in SKIP_PATH_KEYWORDS) or
-                            re.search(r'/\d+$', parsed_link.path)):
+                            re.search(r'/page/\d+$', parsed_link.path.lower())):
                             continue
                         
                         if smart_crawl:
@@ -160,35 +174,40 @@ def run_async_batch(batch, depth, smart_crawl, ignore_query_params):
 
 # --- Streamlit App UI ---
 st.set_page_config(page_title="Advanced Email Extractor", layout="wide")
-st.title("🚀 Advanced Email Extractor")
+st.title("Advanced Email Extractor")
 st.markdown("")
 
 main_container = st.container()
 
 with main_container:
     if not st.session_state.is_running:
-        url_input = st.text_area("Enter URLs (one per line)", height=200, key="url_input")
+        exclude_urls_input = st.text_area("URLs to Exclude (one per line)", height=100, key="exclude_urls", help="Paste any URLs you want the app to completely ignore.")
+        url_input = st.text_area("Enter URLs to Process (one per line)", height=200, key="url_input")
         
         with st.expander("⚙️ Advanced Settings (Optional)"):
             st.session_state.debug_mode = st.checkbox("Enable Debug Mode", value=False, help="Process one URL at a time and show detailed logs.")
             st.session_state.max_concurrent = st.slider("Max Concurrent Requests", 10, 100, MAX_CONCURRENT_REQUESTS)
             st.session_state.request_timeout = st.slider("Request Timeout (seconds)", 5, 30, REQUEST_TIMEOUT)
             st.session_state.crawl_depth = st.slider("Crawling Depth", 0, 2, CRAWL_DEPTH, help="0 = Fastest (only given URLs). 1 = Slower but more thorough.")
+            st.session_state.max_urls_per_domain = st.slider("Max URLs per Domain", 10, 100, DEFAULT_MAX_URLS_PER_DOMAIN, help="Stops crawling a domain after this many pages.")
             st.session_state.smart_crawl = st.checkbox("Enable Smart Crawl (Highly Recommended)", value=True)
             st.session_state.ignore_query_params = st.checkbox("Ignore URLs with Query Parameters", value=True)
-            st.info(f"The app now automatically ignores URL fragments (like `#content`) to prevent infinite loops and stops after visiting {MAX_URLS_PER_DOMAIN} pages per domain.")
+            st.info(f"The app now extracts emails from forms and link text, ensuring maximum accuracy.")
 
         if st.button("🔎 Start Extraction", type="primary"):
             urls = [url.strip() for url in url_input.split('\n') if url.strip()]
-            if urls:
+            exclude_urls = set(url.strip() for url in exclude_urls_input.split('\n') if url.strip())
+            final_urls = [url for url in urls if url not in exclude_urls]
+
+            if final_urls:
                 initialize_session_state()
-                st.session_state.urls_to_visit = set(normalize_url(url) for url in urls)
+                st.session_state.urls_to_visit = set(normalize_url(url) for url in final_urls)
                 st.session_state.total_urls_found = len(st.session_state.urls_to_visit)
                 st.session_state.is_running = True
                 st.session_state.result_file_id = str(time.time())
                 st.rerun()
             else:
-                st.warning("Please enter at least one URL.")
+                st.warning("Please enter at least one valid URL.")
 
     if st.session_state.is_running:
         st.subheader("Processing...")
@@ -230,18 +249,17 @@ with main_container:
             st.session_state.urls_to_visit.difference_update(current_batch)
             
             should_skip_batch = False
-            offending_domain = None
+            max_limit = st.session_state.get('max_urls_per_domain', DEFAULT_MAX_URLS_PER_DOMAIN)
+            
             for url in current_batch:
                 domain = urlparse(url).netloc
-                if st.session_state.domain_visit_counts.get(domain, 0) >= MAX_URLS_PER_DOMAIN:
+                if st.session_state.domain_visit_counts.get(domain, 0) >= max_limit:
                     should_skip_batch = True
-                    offending_domain = domain
-                    st.session_state.stopped_due_to_limit = True
                     break
             
             if should_skip_batch:
                 if st.session_state.debug_mode:
-                    st.warning(f"🛑 SKIPPING BATCH: Domain `{offending_domain}` has reached its visit limit of {MAX_URLS_PER_DOMAIN}.")
+                    st.warning(f"🛑 SKIPPING BATCH: A domain in this batch has reached its visit limit of {max_limit}.")
                 st.session_state.processed_count += len(current_batch)
                 st.session_state.total_urls_found = len(st.session_state.visited_urls) + len(st.session_state.urls_to_visit)
                 time.sleep(0.1)
@@ -300,10 +318,7 @@ with main_container:
             st.rerun()
 
     if st.session_state.extraction_complete:
-        if st.session_state.stopped_due_to_limit:
-            st.warning("Extraction stopped because a domain reached its maximum visit limit to prevent an infinite loop.")
-        else:
-            st.success("Extraction finished. Here are your results.")
+        st.success("Extraction finished. Here are your results.")
         st.balloons()
         
         if st.session_state.all_emails:
