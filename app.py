@@ -12,10 +12,9 @@ import os
 # --- Configuration ---
 MAX_CONCURRENT_REQUESTS = 20
 REQUEST_TIMEOUT = 15
-# ডিফল্ট ডেপথ 0 করা হলো গতির জন্য
-CRAWL_DEPTH = 0 
+# ডিফল্ট ডেপথ ১ করা হলো, কারণ আপনি কন্টাক্ট পেজ থেকে ইমেল চান
+CRAWL_DEPTH = 1 
 CONTACT_KEYWORDS = ['contact', 'about', 'support', 'get-in-touch', 'reach-us', 'team']
-# প্রতি ডোমেইনে সর্বোচ্চ লিঙ্ক কমিয়ে দেওয়া হলো
 MAX_INTERNAL_LINKS_PER_DOMAIN = 2 
 BATCH_SIZE = 5
 
@@ -95,7 +94,8 @@ async def scrape_and_extract_emails(session, url, depth, smart_crawl):
         async with session.get(url, timeout=REQUEST_TIMEOUT) as response:
             if response.status == 200:
                 content = await response.text()
-                soup = BeautifulSoup(content, 'lxml')
+                # ডিফল্ট html.parser-এ ফিরে যাওয়া হলো আরও ভালো সামঞ্জস্যের জন্য
+                soup = BeautifulSoup(content, 'html.parser')
                 
                 # 1. Extract from mailto links
                 for a_tag in soup.find_all('a', href=True):
@@ -104,10 +104,10 @@ async def scrape_and_extract_emails(session, url, depth, smart_crawl):
                         email = href.replace('mailto:', '').split('?')[0].strip()
                         found_emails.add(email)
                 
-                # 2. Extract from plain text and script tags with IMPROVED REGEX
+                # 2. Extract from plain text and script tags with ADVANCED REGEX
                 page_text = soup.get_text() + " ".join([tag.string for tag in soup.find_all('script') if tag.string])
-                # নতুন রেগেক্স: শুধুমাত্র বৈধ ইমেল খুঁজবে
-                emails_in_text = re.findall(r'\b[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}\b', page_text)
+                # নতুন রেগেক্স: শুধুমাত্র বৈধ ইমেল খুঁজবে, সংখ্যা যুক্ত ভুল ইমেল বাদ দেবে
+                emails_in_text = re.findall(r'(?<![a-zA-Z0-9._%+-])[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}\b', page_text)
                 found_emails.update(emails_in_text)
 
                 # 3. Find internal links for crawling if depth is not reached
@@ -159,10 +159,9 @@ with main_container:
         url_input = st.text_area("Enter URLs (one per line)", height=200, key="url_input")
         
         with st.expander("⚙️ Advanced Settings (Optional)"):
-            st.session_state.debug_mode = st.checkbox("Enable Debug Mode", value=False, help="Process one URL at a time and show detailed logs.")
+            st.session_state.debug_mode = st.checkbox("Enable Debug Mode", value=False, help="Process one URL at a time and show detailed logs. Note: Debug info will only appear if this is enabled BEFORE starting.")
             st.session_state.max_concurrent = st.slider("Max Concurrent Requests", 10, 100, MAX_CONCURRENT_REQUESTS)
             st.session_state.request_timeout = st.slider("Request Timeout (seconds)", 5, 30, REQUEST_TIMEOUT)
-            # ডিফল্ট ডেপথ 0 দেখানো হচ্ছে
             st.session_state.crawl_depth = st.slider("Crawling Depth", 0, 2, CRAWL_DEPTH)
             st.session_state.smart_crawl = st.checkbox("Enable Smart Crawl", value=True)
             st.info("Results are saved automatically. You can safely refresh the tab.")
