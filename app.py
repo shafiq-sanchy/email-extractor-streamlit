@@ -79,7 +79,6 @@ def is_valid_url(url):
     except ValueError:
         return False
 
-# --- নতুন ফাংশন: URL নর্মালাইজ করা ---
 def normalize_url(url):
     """Removes the fragment (#) from a URL to prevent infinite loops on the same page."""
     return url.split('#')[0]
@@ -119,7 +118,6 @@ async def scrape_and_extract_emails(session, url, depth, smart_crawl, ignore_que
                     base_domain = urlparse(url).netloc
                     for a_tag in soup.find_all('a', href=True):
                         link = urljoin(url, a_tag['href'])
-                        # --- নতুন ফিল্টার: লিঙ্ক নর্মালাইজ করা হচ্ছে ---
                         normalized_link = normalize_url(link)
                         parsed_link = urlparse(normalized_link)
 
@@ -163,7 +161,7 @@ def run_async_batch(batch, depth, smart_crawl, ignore_query_params):
 # --- Streamlit App UI ---
 st.set_page_config(page_title="Advanced Email Extractor", layout="wide")
 st.title("🚀 Advanced Email Extractor")
-st.markdown("This tool is now protected against aggressive crawler traps and URL fragment loops.")
+st.markdown("")
 
 main_container = st.container()
 
@@ -178,14 +176,12 @@ with main_container:
             st.session_state.crawl_depth = st.slider("Crawling Depth", 0, 2, CRAWL_DEPTH, help="0 = Fastest (only given URLs). 1 = Slower but more thorough.")
             st.session_state.smart_crawl = st.checkbox("Enable Smart Crawl (Highly Recommended)", value=True)
             st.session_state.ignore_query_params = st.checkbox("Ignore URLs with Query Parameters", value=True)
-            # নতুন তথ্য যোগ করা হয়েছে
             st.info(f"The app now automatically ignores URL fragments (like `#content`) to prevent infinite loops and stops after visiting {MAX_URLS_PER_DOMAIN} pages per domain.")
 
         if st.button("🔎 Start Extraction", type="primary"):
             urls = [url.strip() for url in url_input.split('\n') if url.strip()]
             if urls:
                 initialize_session_state()
-                # প্রাথমিক URL গুলোও নর্মালাইজ করা হচ্ছে
                 st.session_state.urls_to_visit = set(normalize_url(url) for url in urls)
                 st.session_state.total_urls_found = len(st.session_state.urls_to_visit)
                 st.session_state.is_running = True
@@ -255,7 +251,6 @@ with main_container:
                 st.write(f"🔍 Processing batch of {len(current_batch)} URL(s):")
                 st.code("\n".join(current_batch))
 
-            # রিজলভ করার আগে ব্যাচের URL গুলোও নর্মালাইজ করা হচ্ছে
             resolved_urls = []
             async def resolve_batch():
                 async with aiohttp.ClientSession() as session:
