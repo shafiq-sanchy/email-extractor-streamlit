@@ -12,11 +12,16 @@ import os
 # --- Configuration ---
 MAX_CONCURRENT_REQUESTS = 20
 REQUEST_TIMEOUT = 12
+# ডিফল্টভাবে লিঙ্কগুলোতে গিয়ে আরও ভালোভাবে অনুসন্ধান করবে
 CRAWL_DEPTH = 1 
 CONTACT_KEYWORDS = [
     'contact', 'about', 'support', 'get-in-touch', 'reach-us', 'team', 'kontakt', 'contato', 'contatti', 
     'contacto', 'kontak', 'hubungi', 'liên hệ', '연락처', 'お問い合わせ'
 ]
+# --- নতুন ফিল্টার ---
+# এই শব্দগুলো থাকলে সেই পেজটি ক্রল করা হবে না
+SKIP_PATH_KEYWORDS = ['blog', 'post', 'article', 'news', 'tag', 'category', 'product', 'shop']
+
 MAX_URLS_PER_DOMAIN = 20
 MAX_QUEUE_SIZE_PER_DOMAIN = 30
 BATCH_SIZE = 20
@@ -118,10 +123,14 @@ async def scrape_and_extract_emails(session, url, depth, smart_crawl, ignore_que
                         if ignore_query_params and parsed_link.query:
                             continue
                         
+                        # --- আপডেটেড ফিল্টারিং লজিক ---
                         if (parsed_link.netloc != base_domain or
                             not parsed_link.scheme in ['http', 'https'] or
                             re.search(r'\.(pdf|jpg|png|zip|doc|xls|css|js|xml)$', link, re.IGNORECASE) or
-                            link.startswith('tel:') or link.startswith('javascript:') or link == '#'):
+                            link.startswith('tel:') or link.startswith('javascript:') or link == '#' or
+                            # নতুন ফিল্টারগুলো এখানে যোগ করা হয়েছে
+                            any(keyword in parsed_link.path.lower() for keyword in SKIP_PATH_KEYWORDS) or
+                            re.search(r'/\d+$', parsed_link.path)): # সংখ্যাযুক্ত URL ফিল্টার
                             continue
                         
                         if smart_crawl:
@@ -153,7 +162,7 @@ def run_async_batch(batch, depth, smart_crawl, ignore_query_params):
 # --- Streamlit App UI ---
 st.set_page_config(page_title="Advanced Email Extractor", layout="wide")
 st.title("🚀 Advanced Email Extractor")
-st.markdown("Enjoy!")
+st.markdown("This tool is now faster and smarter, automatically skipping irrelevant pages like blog posts and categories.")
 
 main_container = st.container()
 
@@ -168,7 +177,8 @@ with main_container:
             st.session_state.crawl_depth = st.slider("Crawling Depth", 0, 2, CRAWL_DEPTH, help="0 = Fastest (only given URLs). 1 = Slower but more thorough (checks links on those pages).")
             st.session_state.smart_crawl = st.checkbox("Enable Smart Crawl (Highly Recommended)", value=True, help="Prioritizes pages like 'Contact Us' to find emails faster.")
             st.session_state.ignore_query_params = st.checkbox("Ignore URLs with Query Parameters", value=True)
-            st.info("For the best speed, use Crawling Depth 0. Increase it only if you don't find enough emails.")
+            # নতুন তথ্য যোগ করা হয়েছে
+            st.info("The app now automatically skips pages with URLs containing numbers at the end, or words like 'blog', 'category', 'post', etc., to save time and focus on relevant pages.")
 
         if st.button("🔎 Start Extraction", type="primary"):
             urls = [url.strip() for url in url_input.split('\n') if url.strip()]
