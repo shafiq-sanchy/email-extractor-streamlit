@@ -4,4 +4,5 @@ beautifulsoup4
 dnspython
 pandas
 aiohttp
+lxml
 
