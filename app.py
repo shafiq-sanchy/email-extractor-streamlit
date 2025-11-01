@@ -11,17 +11,15 @@ import os
 
 # --- Configuration ---
 MAX_CONCURRENT_REQUESTS = 20
-REQUEST_TIMEOUT = 15
-CRAWL_DEPTH = 1
+REQUEST_TIMEOUT = 12
+CRAWL_DEPTH = 1 
 CONTACT_KEYWORDS = [
     'contact', 'about', 'support', 'get-in-touch', 'reach-us', 'team', 'kontakt', 'contato', 'contatti', 
     'contacto', 'kontak', 'hubungi', 'liên hệ', '연락처', 'お問い合わせ'
 ]
-# প্রতি ডোমেইনে সর্বোচ্চ কতটি URL ভিজিট করা হবে
 MAX_URLS_PER_DOMAIN = 20
-# প্রতি ডোমেইনে কিউতে সর্বোচ্চ কতটি URL থাকতে পারে (ক্রলার ট্র্যাপ প্রতিরোধ করতে)
-MAX_QUEUE_SIZE_PER_DOMAIN = 50
-BATCH_SIZE = 5
+MAX_QUEUE_SIZE_PER_DOMAIN = 30
+BATCH_SIZE = 20
 
 # --- File and Session State Management ---
 RESULTS_DIR = "temp_results"
@@ -122,7 +120,7 @@ async def scrape_and_extract_emails(session, url, depth, smart_crawl, ignore_que
                         
                         if (parsed_link.netloc != base_domain or
                             not parsed_link.scheme in ['http', 'https'] or
-                            re.search(r'\.(pdf|jpg|png|zip|doc|xls|css|js)$', link, re.IGNORECASE) or
+                            re.search(r'\.(pdf|jpg|png|zip|doc|xls|css|js|xml)$', link, re.IGNORECASE) or
                             link.startswith('tel:') or link.startswith('javascript:') or link == '#'):
                             continue
                         
@@ -155,7 +153,7 @@ def run_async_batch(batch, depth, smart_crawl, ignore_query_params):
 # --- Streamlit App UI ---
 st.set_page_config(page_title="Advanced Email Extractor", layout="wide")
 st.title("🚀 Advanced Email Extractor")
-st.markdown("This tool is now smarter, prioritizes contact pages, and is protected against aggressive crawler traps.")
+st.markdown("Enjoy!")
 
 main_container = st.container()
 
@@ -167,10 +165,10 @@ with main_container:
             st.session_state.debug_mode = st.checkbox("Enable Debug Mode", value=False, help="Process one URL at a time and show detailed logs.")
             st.session_state.max_concurrent = st.slider("Max Concurrent Requests", 10, 100, MAX_CONCURRENT_REQUESTS)
             st.session_state.request_timeout = st.slider("Request Timeout (seconds)", 5, 30, REQUEST_TIMEOUT)
-            st.session_state.crawl_depth = st.slider("Crawling Depth", 0, 2, CRAWL_DEPTH)
-            st.session_state.smart_crawl = st.checkbox("Enable Smart Crawl (Highly Recommended)", value=True)
+            st.session_state.crawl_depth = st.slider("Crawling Depth", 0, 2, CRAWL_DEPTH, help="0 = Fastest (only given URLs). 1 = Slower but more thorough (checks links on those pages).")
+            st.session_state.smart_crawl = st.checkbox("Enable Smart Crawl (Highly Recommended)", value=True, help="Prioritizes pages like 'Contact Us' to find emails faster.")
             st.session_state.ignore_query_params = st.checkbox("Ignore URLs with Query Parameters", value=True)
-            st.info("Results are saved automatically. You can safely refresh the tab.")
+            st.info("For the best speed, use Crawling Depth 0. Increase it only if you don't find enough emails.")
 
         if st.button("🔎 Start Extraction", type="primary"):
             urls = [url.strip() for url in url_input.split('\n') if url.strip()]
@@ -254,21 +252,17 @@ with main_container:
                     st.session_state.failed_urls.append(url)
                 
                 if CRAWL_DEPTH > 0:
-                    # --- নতুন লজিক: কিউ লিমিটার সহ লিঙ্ক যোগ করা ---
                     all_new_links = set(priority_links) | set(regular_links)
                     for link in all_new_links:
                         if link not in st.session_state.visited_urls and link not in st.session_state.urls_to_visit:
                             domain = urlparse(link).netloc
-                            
-                            # ডোমেইন অনুযায়ী কিউতে কতটি আইটেম আছে তা গণনা করা
                             queue_count_for_domain = sum(1 for u in st.session_state.urls_to_visit if urlparse(u).netloc == domain)
                             
                             if queue_count_for_domain < MAX_QUEUE_SIZE_PER_DOMAIN:
                                 st.session_state.urls_to_visit.add(link)
                             elif st.session_state.debug_mode:
-                                st.warning(f"🛑 SKIPPED: Link `{link}` not added to queue. Queue for domain `{domain}` is full ({queue_count_for_domain}/{MAX_QUEUE_SIZE_PER_DOMAIN}).")
+                                st.warning(f"🛑 SKIPPED: Link `{link}` not added to queue. Queue for domain `{domain}` is full.")
 
-            # প্রসেস হওয়ার পর ডোমেইন ভিজিট কাউন্ট আপডেট করা
             for url in resolved_urls:
                 domain = urlparse(url).netloc
                 st.session_state.domain_visit_counts[domain] = st.session_state.domain_visit_counts.get(domain, 0) + 1
@@ -276,7 +270,7 @@ with main_container:
             st.session_state.processed_count += len(current_batch)
             st.session_state.total_urls_found = len(st.session_state.visited_urls) + len(st.session_state.urls_to_visit)
             
-            time.sleep(0.5)
+            time.sleep(0.1)
             st.rerun()
 
     if st.session_state.extraction_complete:
