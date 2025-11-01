@@ -10,13 +10,12 @@ import json
 import os
 
 # --- Configuration ---
-MAX_CONCURRENT_REQUESTS = 50
-REQUEST_TIMEOUT = 10
+MAX_CONCURRENT_REQUESTS = 20 # কমিয়ে দেওয়া হয়েছে
+REQUEST_TIMEOUT = 15
 CRAWL_DEPTH = 1
 CONTACT_KEYWORDS = ['contact', 'about', 'support', 'get-in-touch', 'reach-us', 'team']
 MAX_INTERNAL_LINKS_PER_DOMAIN = 5
-# প্রতি ব্যাচে কতগুলো URL প্রসেস হবে
-BATCH_SIZE = 20
+BATCH_SIZE = 5 # ডিফল্ট ব্যাচ সাইজ কমানো হয়েছে
 
 # --- File and Session State Management ---
 RESULTS_DIR = "temp_results"
@@ -47,7 +46,8 @@ def initialize_session_state():
     defaults = {
         'is_running': False, 'stop_extraction': False, 'extraction_complete': False, 'result_file_id': None,
         'initial_urls': [], 'urls_to_visit': set(), 'visited_urls': set(), 'all_emails': set(),
-        'failed_urls': [], 'timeout_urls': [], 'domain_link_counts': {}, 'processed_count': 0, 'total_urls_found': 0
+        'failed_urls': [], 'timeout_urls': [], 'domain_link_counts': {}, 'processed_count': 0, 'total_urls_found': 0,
+        'debug_mode': False # নতুন ডিবাগ মোড
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -66,7 +66,7 @@ if st.session_state.result_file_id and not st.session_state.is_running and not s
     else:
         st.session_state.result_file_id = None
 
-# --- Helper Functions (No changes here) ---
+# --- Helper Functions ---
 def is_valid_url(url):
     try:
         result = urlparse(url)
@@ -122,17 +122,16 @@ async def scrape_and_extract_emails(session, url, depth, smart_crawl):
                             regular_links.add(link)
     except asyncio.TimeoutError:
         return list(found_emails), list(priority_links), list(regular_links), "timeout"
-    except Exception:
-        return list(found_emails), list(priority_links), list(regular_links), "error"
+    except Exception as e:
+        # এররটিকে রিটার্ন করা হচ্ছে ডিবাগিং এর জন্য
+        return list(found_emails), list(priority_links), list(regular_links), f"error: {str(e)}"
     return list(found_emails), list(priority_links), list(regular_links), "success"
 
 async def process_url_wrapper(session, url, depth, smart_crawl):
     emails, priority_links, regular_links, status = await scrape_and_extract_emails(session, url, depth, smart_crawl)
     return url, emails, priority_links, regular_links, status
 
-# --- NEW: Batch Processing Function ---
 def run_async_batch(batch, depth, smart_crawl):
-    """Runs a single batch of URLs asynchronously."""
     async def _run():
         async with aiohttp.ClientSession() as session:
             tasks = [process_url_wrapper(session, url, depth, smart_crawl) for url in batch]
@@ -151,7 +150,7 @@ with col1:
         if st.button("🔎 Start Extraction", type="primary"):
             urls = [url.strip() for url in st.text_area("Enter URLs (one per line)", height=200, key="url_input_start").split('\n') if url.strip()]
             if urls:
-                initialize_session_state() # Reset state
+                initialize_session_state()
                 st.session_state.initial_urls = urls
                 st.session_state.urls_to_visit = set(urls)
                 st.session_state.total_urls_found = len(urls)
@@ -183,18 +182,23 @@ if st.session_state.is_running:
         unsafe_allow_html=True
     )
 
-    # --- Check for Stop Condition ---
     if st.session_state.stop_extraction or not st.session_state.urls_to_visit:
         st.session_state.is_running = False
         st.session_state.extraction_complete = True
         save_results_to_file(list(st.session_state.all_emails), st.session_state.failed_urls, st.session_state.timeout_urls, st.session_state.result_file_id)
         st.rerun()
     else:
-        # --- Process a Batch ---
-        current_batch = list(st.session_state.urls_to_visit)[:BATCH_SIZE]
+        # ডিবাগ মোড অনুযায়ী ব্যাচ সাইজ নির্ধারণ
+        current_batch_size = 1 if st.session_state.debug_mode else BATCH_SIZE
+        current_batch = list(st.session_state.urls_to_visit)[:current_batch_size]
         st.session_state.urls_to_visit.difference_update(current_batch)
         
-        # Resolve URLs for the batch
+        # ডিবাগ মোডে বিস্তারিত তথ্য দেখানো
+        if st.session_state.debug_mode:
+            st.write(f"🔍 Debug Mode: Processing batch of {len(current_batch)} URL(s):")
+            st.code("\n".join(current_batch))
+
+        # Resolve URLs
         resolved_urls = []
         async def resolve_batch():
             async with aiohttp.ClientSession() as session:
@@ -202,16 +206,26 @@ if st.session_state.is_running:
                 return await asyncio.gather(*tasks)
         resolved_urls = asyncio.run(resolve_batch())
 
-        # Run the main extraction for the resolved batch
+        # Run extraction
         batch_results = run_async_batch(resolved_urls, CRAWL_DEPTH, st.session_state.get('smart_crawl', True))
         
-        # --- Update Session State with Batch Results ---
+        # --- Update Session State ---
         for url, emails, priority_links, regular_links, status in batch_results:
             st.session_state.visited_urls.add(url)
             st.session_state.all_emails.update(emails)
-            if status == "timeout":
+            
+            # ডিবাগ মোডে প্রতিটি URL এর ফলাফল দেখানো
+            if st.session_state.debug_mode:
+                st.write(f"**URL:** `{url}`")
+                st.write(f"**Status:** {status}")
+                st.write(f"**Emails Found:** {len(emails)}")
+                if emails:
+                    st.code("\n".join(emails))
+                st.divider()
+
+            if "timeout" in status:
                 st.session_state.timeout_urls.append(url)
-            elif status == "error":
+            elif "error" in status:
                 st.session_state.failed_urls.append(url)
             
             if CRAWL_DEPTH > 0:
@@ -234,8 +248,7 @@ if st.session_state.is_running:
         st.session_state.processed_count += len(current_batch)
         st.session_state.total_urls_found = len(st.session_state.visited_urls) + len(st.session_state.urls_to_visit)
         
-        # --- Rerun to show progress ---
-        time.sleep(0.1) # Small delay to prevent overwhelming the UI
+        time.sleep(0.5) # একটু বেশি ডিলে দেওয়া হলো
         st.rerun()
 
 # --- Display Results ---
@@ -267,6 +280,8 @@ elif st.session_state.extraction_complete:
 else:
     st.text_area("Enter URLs (one per line)", height=200, key="url_input_idle")
     with st.expander("⚙️ Advanced Settings (Optional)"):
+        # ডিবাগ মোডের চেকবক্স
+        st.session_state.debug_mode = st.checkbox("Enable Debug Mode (Process one URL at a time and show details)", value=False)
         st.session_state.max_concurrent = st.slider("Max Concurrent Requests", 10, 100, MAX_CONCURRENT_REQUESTS)
         st.session_state.request_timeout = st.slider("Request Timeout (seconds)", 5, 30, REQUEST_TIMEOUT)
         st.session_state.crawl_depth = st.slider("Crawling Depth", 0, 2, CRAWL_DEPTH)
