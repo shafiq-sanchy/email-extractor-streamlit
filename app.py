@@ -12,17 +12,13 @@ import os
 # --- Configuration ---
 MAX_CONCURRENT_REQUESTS = 20
 REQUEST_TIMEOUT = 12
-# ডিফল্টভাবে লিঙ্কগুলোতে গিয়ে আরও ভালোভাবে অনুসন্ধান করবে
 CRAWL_DEPTH = 1 
 CONTACT_KEYWORDS = [
     'contact', 'about', 'support', 'get-in-touch', 'reach-us', 'team', 'kontakt', 'contato', 'contatti', 
     'contacto', 'kontak', 'hubungi', 'liên hệ', '연락처', 'お問い合わせ'
 ]
-# --- নতুন ফিল্টার ---
-# এই শব্দগুলো থাকলে সেই পেজটি ক্রল করা হবে না
 SKIP_PATH_KEYWORDS = ['blog', 'post', 'article', 'news', 'tag', 'category', 'product', 'shop']
-
-MAX_URLS_PER_DOMAIN = 20
+MAX_URLS_PER_DOMAIN = 25 
 MAX_QUEUE_SIZE_PER_DOMAIN = 30
 BATCH_SIZE = 20
 
@@ -56,7 +52,7 @@ def initialize_session_state():
         'is_running': False, 'stop_extraction': False, 'extraction_complete': False, 'result_file_id': None,
         'urls_to_visit': set(), 'visited_urls': set(), 'all_emails': set(),
         'failed_urls': [], 'timeout_urls': [], 'domain_visit_counts': {}, 'processed_count': 0, 'total_urls_found': 0,
-        'debug_mode': False
+        'debug_mode': False, 'stopped_due_to_limit': False
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -82,6 +78,11 @@ def is_valid_url(url):
         return all([result.scheme, result.netloc])
     except ValueError:
         return False
+
+# --- নতুন ফাংশন: URL নর্মালাইজ করা ---
+def normalize_url(url):
+    """Removes the fragment (#) from a URL to prevent infinite loops on the same page."""
+    return url.split('#')[0]
 
 async def resolve_url(session, url):
     try:
@@ -118,30 +119,30 @@ async def scrape_and_extract_emails(session, url, depth, smart_crawl, ignore_que
                     base_domain = urlparse(url).netloc
                     for a_tag in soup.find_all('a', href=True):
                         link = urljoin(url, a_tag['href'])
-                        parsed_link = urlparse(link)
+                        # --- নতুন ফিল্টার: লিঙ্ক নর্মালাইজ করা হচ্ছে ---
+                        normalized_link = normalize_url(link)
+                        parsed_link = urlparse(normalized_link)
 
                         if ignore_query_params and parsed_link.query:
                             continue
                         
-                        # --- আপডেটেড ফিল্টারিং লজিক ---
                         if (parsed_link.netloc != base_domain or
                             not parsed_link.scheme in ['http', 'https'] or
-                            re.search(r'\.(pdf|jpg|png|zip|doc|xls|css|js|xml)$', link, re.IGNORECASE) or
-                            link.startswith('tel:') or link.startswith('javascript:') or link == '#' or
-                            # নতুন ফিল্টারগুলো এখানে যোগ করা হয়েছে
+                            re.search(r'\.(pdf|jpg|png|zip|doc|xls|css|js|xml)$', normalized_link, re.IGNORECASE) or
+                            normalized_link.startswith('tel:') or normalized_link.startswith('javascript:') or normalized_link == '#' or
                             any(keyword in parsed_link.path.lower() for keyword in SKIP_PATH_KEYWORDS) or
-                            re.search(r'/\d+$', parsed_link.path)): # সংখ্যাযুক্ত URL ফিল্টার
+                            re.search(r'/\d+$', parsed_link.path)):
                             continue
                         
                         if smart_crawl:
                             link_text = a_tag.get_text().lower()
                             link_path = parsed_link.path.lower()
                             if any(keyword in link_text or keyword in link_path for keyword in CONTACT_KEYWORDS):
-                                priority_links.add(link)
+                                priority_links.add(normalized_link)
                             else:
-                                regular_links.add(link)
+                                regular_links.add(normalized_link)
                         else:
-                            regular_links.add(link)
+                            regular_links.add(normalized_link)
     except asyncio.TimeoutError:
         return list(found_emails), list(priority_links), list(regular_links), "timeout"
     except Exception as e:
@@ -162,7 +163,7 @@ def run_async_batch(batch, depth, smart_crawl, ignore_query_params):
 # --- Streamlit App UI ---
 st.set_page_config(page_title="Advanced Email Extractor", layout="wide")
 st.title("🚀 Advanced Email Extractor")
-st.markdown("This tool is now faster and smarter, automatically skipping irrelevant pages like blog posts and categories.")
+st.markdown("This tool is now protected against aggressive crawler traps and URL fragment loops.")
 
 main_container = st.container()
 
@@ -174,18 +175,19 @@ with main_container:
             st.session_state.debug_mode = st.checkbox("Enable Debug Mode", value=False, help="Process one URL at a time and show detailed logs.")
             st.session_state.max_concurrent = st.slider("Max Concurrent Requests", 10, 100, MAX_CONCURRENT_REQUESTS)
             st.session_state.request_timeout = st.slider("Request Timeout (seconds)", 5, 30, REQUEST_TIMEOUT)
-            st.session_state.crawl_depth = st.slider("Crawling Depth", 0, 2, CRAWL_DEPTH, help="0 = Fastest (only given URLs). 1 = Slower but more thorough (checks links on those pages).")
-            st.session_state.smart_crawl = st.checkbox("Enable Smart Crawl (Highly Recommended)", value=True, help="Prioritizes pages like 'Contact Us' to find emails faster.")
+            st.session_state.crawl_depth = st.slider("Crawling Depth", 0, 2, CRAWL_DEPTH, help="0 = Fastest (only given URLs). 1 = Slower but more thorough.")
+            st.session_state.smart_crawl = st.checkbox("Enable Smart Crawl (Highly Recommended)", value=True)
             st.session_state.ignore_query_params = st.checkbox("Ignore URLs with Query Parameters", value=True)
             # নতুন তথ্য যোগ করা হয়েছে
-            st.info("The app now automatically skips pages with URLs containing numbers at the end, or words like 'blog', 'category', 'post', etc., to save time and focus on relevant pages.")
+            st.info(f"The app now automatically ignores URL fragments (like `#content`) to prevent infinite loops and stops after visiting {MAX_URLS_PER_DOMAIN} pages per domain.")
 
         if st.button("🔎 Start Extraction", type="primary"):
             urls = [url.strip() for url in url_input.split('\n') if url.strip()]
             if urls:
                 initialize_session_state()
-                st.session_state.urls_to_visit = set(urls)
-                st.session_state.total_urls_found = len(urls)
+                # প্রাথমিক URL গুলোও নর্মালাইজ করা হচ্ছে
+                st.session_state.urls_to_visit = set(normalize_url(url) for url in urls)
+                st.session_state.total_urls_found = len(st.session_state.urls_to_visit)
                 st.session_state.is_running = True
                 st.session_state.result_file_id = str(time.time())
                 st.rerun()
@@ -231,14 +233,33 @@ with main_container:
             current_batch = list(st.session_state.urls_to_visit)[:current_batch_size]
             st.session_state.urls_to_visit.difference_update(current_batch)
             
+            should_skip_batch = False
+            offending_domain = None
+            for url in current_batch:
+                domain = urlparse(url).netloc
+                if st.session_state.domain_visit_counts.get(domain, 0) >= MAX_URLS_PER_DOMAIN:
+                    should_skip_batch = True
+                    offending_domain = domain
+                    st.session_state.stopped_due_to_limit = True
+                    break
+            
+            if should_skip_batch:
+                if st.session_state.debug_mode:
+                    st.warning(f"🛑 SKIPPING BATCH: Domain `{offending_domain}` has reached its visit limit of {MAX_URLS_PER_DOMAIN}.")
+                st.session_state.processed_count += len(current_batch)
+                st.session_state.total_urls_found = len(st.session_state.visited_urls) + len(st.session_state.urls_to_visit)
+                time.sleep(0.1)
+                st.rerun()
+
             if st.session_state.debug_mode:
                 st.write(f"🔍 Processing batch of {len(current_batch)} URL(s):")
                 st.code("\n".join(current_batch))
 
+            # রিজলভ করার আগে ব্যাচের URL গুলোও নর্মালাইজ করা হচ্ছে
             resolved_urls = []
             async def resolve_batch():
                 async with aiohttp.ClientSession() as session:
-                    tasks = [resolve_url(session, url) for url in current_batch]
+                    tasks = [resolve_url(session, normalize_url(url)) for url in current_batch]
                     return await asyncio.gather(*tasks)
             resolved_urls = asyncio.run(resolve_batch())
 
@@ -284,7 +305,10 @@ with main_container:
             st.rerun()
 
     if st.session_state.extraction_complete:
-        st.success("Extraction finished. Here are your results.")
+        if st.session_state.stopped_due_to_limit:
+            st.warning("Extraction stopped because a domain reached its maximum visit limit to prevent an infinite loop.")
+        else:
+            st.success("Extraction finished. Here are your results.")
         st.balloons()
         
         if st.session_state.all_emails:
