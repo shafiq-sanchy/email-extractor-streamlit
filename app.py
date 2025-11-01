@@ -12,9 +12,11 @@ import os
 # --- Configuration ---
 MAX_CONCURRENT_REQUESTS = 20
 REQUEST_TIMEOUT = 15
-CRAWL_DEPTH = 1
+# ডিফল্ট ডেপথ 0 করা হলো গতির জন্য
+CRAWL_DEPTH = 0 
 CONTACT_KEYWORDS = ['contact', 'about', 'support', 'get-in-touch', 'reach-us', 'team']
-MAX_INTERNAL_LINKS_PER_DOMAIN = 5
+# প্রতি ডোমেইনে সর্বোচ্চ লিঙ্ক কমিয়ে দেওয়া হলো
+MAX_INTERNAL_LINKS_PER_DOMAIN = 2 
 BATCH_SIZE = 5
 
 # --- File and Session State Management ---
@@ -94,14 +96,21 @@ async def scrape_and_extract_emails(session, url, depth, smart_crawl):
             if response.status == 200:
                 content = await response.text()
                 soup = BeautifulSoup(content, 'lxml')
+                
+                # 1. Extract from mailto links
                 for a_tag in soup.find_all('a', href=True):
                     href = a_tag['href']
                     if href.startswith('mailto:'):
-                        email = href.replace('mailto:', '').split('?')[0]
+                        email = href.replace('mailto:', '').split('?')[0].strip()
                         found_emails.add(email)
+                
+                # 2. Extract from plain text and script tags with IMPROVED REGEX
                 page_text = soup.get_text() + " ".join([tag.string for tag in soup.find_all('script') if tag.string])
-                emails_in_text = re.findall(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}', page_text)
+                # নতুন রেগেক্স: শুধুমাত্র বৈধ ইমেল খুঁজবে
+                emails_in_text = re.findall(r'\b[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}\b', page_text)
                 found_emails.update(emails_in_text)
+
+                # 3. Find internal links for crawling if depth is not reached
                 if depth > 0:
                     base_domain = urlparse(url).netloc
                     for a_tag in soup.find_all('a', href=True):
@@ -111,6 +120,7 @@ async def scrape_and_extract_emails(session, url, depth, smart_crawl):
                             re.search(r'\.(pdf|jpg|png|zip|doc|xls|css|js)$', link, re.IGNORECASE) or
                             link.startswith('tel:') or link.startswith('javascript:') or link == '#'):
                             continue
+                        
                         if smart_crawl:
                             link_text = a_tag.get_text().lower()
                             link_path = parsed_link.path.lower()
@@ -142,30 +152,25 @@ st.set_page_config(page_title="Advanced Email Extractor", layout="wide")
 st.title("🚀 Advanced Email Extractor")
 st.markdown("This tool extracts emails with real-time progress and saves results automatically.")
 
-# --- Main Logic Container ---
-# এই কন্টেইনারটি UI-কে সংগঠিত রাখতে সাহায্য করবে
 main_container = st.container()
 
 with main_container:
-    # --- URL Input Section ---
-    # শুধুমাত্র যখন কাজ চলছে না, তখন ইনপুট নেওয়া হবে
     if not st.session_state.is_running:
         url_input = st.text_area("Enter URLs (one per line)", height=200, key="url_input")
         
-        # --- Settings Section ---
         with st.expander("⚙️ Advanced Settings (Optional)"):
             st.session_state.debug_mode = st.checkbox("Enable Debug Mode", value=False, help="Process one URL at a time and show detailed logs.")
             st.session_state.max_concurrent = st.slider("Max Concurrent Requests", 10, 100, MAX_CONCURRENT_REQUESTS)
             st.session_state.request_timeout = st.slider("Request Timeout (seconds)", 5, 30, REQUEST_TIMEOUT)
+            # ডিফল্ট ডেপথ 0 দেখানো হচ্ছে
             st.session_state.crawl_depth = st.slider("Crawling Depth", 0, 2, CRAWL_DEPTH)
             st.session_state.smart_crawl = st.checkbox("Enable Smart Crawl", value=True)
             st.info("Results are saved automatically. You can safely refresh the tab.")
 
-        # --- Start Button ---
         if st.button("🔎 Start Extraction", type="primary"):
             urls = [url.strip() for url in url_input.split('\n') if url.strip()]
             if urls:
-                initialize_session_state() # Reset state for a new run
+                initialize_session_state()
                 st.session_state.urls_to_visit = set(urls)
                 st.session_state.total_urls_found = len(urls)
                 st.session_state.is_running = True
@@ -174,18 +179,14 @@ with main_container:
             else:
                 st.warning("Please enter at least one URL.")
 
-    # --- Processing Section ---
     if st.session_state.is_running:
         st.subheader("Processing...")
         
-        # --- সংশোধিত প্রোগ্রেস বার লজিক ---
-        # ডিনোমিনেটর যেন শূন্য না হয়, সেই ব্যবস্থা
         if st.session_state.total_urls_found > 0:
             progress_value = st.session_state.processed_count / st.session_state.total_urls_found
         else:
             progress_value = 0.0
         
-        # ভ্যালুকে 0.0 এবং 1.0 এর মধ্যে আটকে রাখা
         progress = min(1.0, max(0.0, progress_value))
         progress_bar = st.progress(progress)
         
@@ -196,7 +197,6 @@ with main_container:
             unsafe_allow_html=True
         )
 
-        # ডিবাগ মোডে আসল সংখ্যাগুলো দেখানো
         if st.session_state.debug_mode:
             st.write("--- Debug Info ---")
             st.write(f"Processed Count: {st.session_state.processed_count}")
@@ -205,11 +205,9 @@ with main_container:
             st.write(f"Clamped Progress Value: {progress}")
             st.write("-------------------")
 
-        # --- Stop Button ---
         if st.button("⏹️ Stop Extraction"):
             st.session_state.stop_extraction = True
 
-        # --- Main Processing Loop ---
         if st.session_state.stop_extraction or not st.session_state.urls_to_visit:
             st.session_state.is_running = False
             st.session_state.extraction_complete = True
@@ -273,7 +271,6 @@ with main_container:
             time.sleep(0.5)
             st.rerun()
 
-    # --- Results Section ---
     if st.session_state.extraction_complete:
         st.success("Extraction finished. Here are your results.")
         st.balloons()
@@ -298,7 +295,6 @@ with main_container:
                 if st.session_state.failed_urls: st.error(f"**{len(st.session_state.failed_urls)} URLs Failed:**"); st.text("\n".join(st.session_state.failed_urls))
             st.info("💡 You can copy these URLs and exclude them from your next run to save time.")
         
-        # --- Clear Results Button ---
         if st.button("🗑️ Clear Results & Start New Search"):
             clear_results_file(st.session_state.result_file_id)
             for key in st.session_state.keys():
