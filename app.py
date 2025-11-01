@@ -12,10 +12,14 @@ import os
 # --- Configuration ---
 MAX_CONCURRENT_REQUESTS = 20
 REQUEST_TIMEOUT = 15
-# ডিফল্ট ডেপথ ১ করা হলো, কারণ আপনি কন্টাক্ট পেজ থেকে ইমেল চান
-CRAWL_DEPTH = 1 
-CONTACT_KEYWORDS = ['contact', 'about', 'support', 'get-in-touch', 'reach-us', 'team']
-MAX_INTERNAL_LINKS_PER_DOMAIN = 2 
+CRAWL_DEPTH = 1
+# বিস্তৃত করা হয়েছে বিভিন্ন ভাষা এবং বানানের জন্য
+CONTACT_KEYWORDS = [
+    'contact', 'about', 'support', 'get-in-touch', 'reach-us', 'team', 'kontakt', 'contato', 'contatti', 
+    'contacto', 'kontak', 'hubungi', 'liên hệ', '연락처', 'お問い合わせ'
+]
+# প্রতি ডোমেইনে সর্বোচ্চ কতটি URL ভিজিট করা হবে (অগ্রাধিকারপ্রাপ্ত লিঙ্ক শেষ হওয়ার পর)
+MAX_URLS_PER_DOMAIN = 20 
 BATCH_SIZE = 5
 
 # --- File and Session State Management ---
@@ -47,7 +51,7 @@ def initialize_session_state():
     defaults = {
         'is_running': False, 'stop_extraction': False, 'extraction_complete': False, 'result_file_id': None,
         'urls_to_visit': set(), 'visited_urls': set(), 'all_emails': set(),
-        'failed_urls': [], 'timeout_urls': [], 'domain_link_counts': {}, 'processed_count': 0, 'total_urls_found': 0,
+        'failed_urls': [], 'timeout_urls': [], 'domain_visit_counts': {}, 'processed_count': 0, 'total_urls_found': 0,
         'debug_mode': False
     }
     for key, value in defaults.items():
@@ -86,7 +90,7 @@ async def resolve_url(session, url):
         except Exception:
             return url
 
-async def scrape_and_extract_emails(session, url, depth, smart_crawl):
+async def scrape_and_extract_emails(session, url, depth, smart_crawl, ignore_query_params):
     found_emails = set()
     priority_links = set()
     regular_links = set()
@@ -94,29 +98,30 @@ async def scrape_and_extract_emails(session, url, depth, smart_crawl):
         async with session.get(url, timeout=REQUEST_TIMEOUT) as response:
             if response.status == 200:
                 content = await response.text()
-                # ডিফল্ট html.parser-এ ফিরে যাওয়া হলো আরও ভালো সামঞ্জস্যের জন্য
                 soup = BeautifulSoup(content, 'html.parser')
                 
-                # 1. Extract from mailto links
                 for a_tag in soup.find_all('a', href=True):
                     href = a_tag['href']
                     if href.startswith('mailto:'):
                         email = href.replace('mailto:', '').split('?')[0].strip()
                         found_emails.add(email)
                 
-                # 2. Extract from plain text and script tags with ADVANCED REGEX
                 page_text = soup.get_text() + " ".join([tag.string for tag in soup.find_all('script') if tag.string])
-                # নতুন রেগেক্স: শুধুমাত্র বৈধ ইমেল খুঁজবে, সংখ্যা যুক্ত ভুল ইমেল বাদ দেবে
-                emails_in_text = re.findall(r'(?<![a-zA-Z0-9._%+-])[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}\b', page_text)
+                # আলটিমেট রেগেক্স: ইমেল অবশ্যই একটি অক্ষর দিয়ে শুরু হতে হবে
+                emails_in_text = re.findall(r'\b[a-zA-Z][a-zA-Z0-9._%+-]*@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}\b', page_text)
                 found_emails.update(emails_in_text)
 
-                # 3. Find internal links for crawling if depth is not reached
                 if depth > 0:
                     base_domain = urlparse(url).netloc
                     for a_tag in soup.find_all('a', href=True):
                         link = urljoin(url, a_tag['href'])
                         parsed_link = urlparse(link)
-                        if (parsed_link.netloc != base_domain or not parsed_link.scheme in ['http', 'https'] or
+
+                        if ignore_query_params and parsed_link.query:
+                            continue
+                        
+                        if (parsed_link.netloc != base_domain or
+                            not parsed_link.scheme in ['http', 'https'] or
                             re.search(r'\.(pdf|jpg|png|zip|doc|xls|css|js)$', link, re.IGNORECASE) or
                             link.startswith('tel:') or link.startswith('javascript:') or link == '#'):
                             continue
@@ -136,21 +141,21 @@ async def scrape_and_extract_emails(session, url, depth, smart_crawl):
         return list(found_emails), list(priority_links), list(regular_links), f"error: {str(e)}"
     return list(found_emails), list(priority_links), list(regular_links), "success"
 
-async def process_url_wrapper(session, url, depth, smart_crawl):
-    emails, priority_links, regular_links, status = await scrape_and_extract_emails(session, url, depth, smart_crawl)
+async def process_url_wrapper(session, url, depth, smart_crawl, ignore_query_params):
+    emails, priority_links, regular_links, status = await scrape_and_extract_emails(session, url, depth, smart_crawl, ignore_query_params)
     return url, emails, priority_links, regular_links, status
 
-def run_async_batch(batch, depth, smart_crawl):
+def run_async_batch(batch, depth, smart_crawl, ignore_query_params):
     async def _run():
         async with aiohttp.ClientSession() as session:
-            tasks = [process_url_wrapper(session, url, depth, smart_crawl) for url in batch]
+            tasks = [process_url_wrapper(session, url, depth, smart_crawl, ignore_query_params) for url in batch]
             return await asyncio.gather(*tasks)
     return asyncio.run(_run())
 
 # --- Streamlit App UI ---
 st.set_page_config(page_title="Advanced Email Extractor", layout="wide")
 st.title("🚀 Advanced Email Extractor")
-st.markdown("This tool extracts emails with real-time progress and saves results automatically.")
+st.markdown("This tool is now smarter, prioritizes contact pages, and is more accurate.")
 
 main_container = st.container()
 
@@ -159,11 +164,12 @@ with main_container:
         url_input = st.text_area("Enter URLs (one per line)", height=200, key="url_input")
         
         with st.expander("⚙️ Advanced Settings (Optional)"):
-            st.session_state.debug_mode = st.checkbox("Enable Debug Mode", value=False, help="Process one URL at a time and show detailed logs. Note: Debug info will only appear if this is enabled BEFORE starting.")
+            st.session_state.debug_mode = st.checkbox("Enable Debug Mode", value=False, help="Process one URL at a time and show detailed logs.")
             st.session_state.max_concurrent = st.slider("Max Concurrent Requests", 10, 100, MAX_CONCURRENT_REQUESTS)
             st.session_state.request_timeout = st.slider("Request Timeout (seconds)", 5, 30, REQUEST_TIMEOUT)
             st.session_state.crawl_depth = st.slider("Crawling Depth", 0, 2, CRAWL_DEPTH)
-            st.session_state.smart_crawl = st.checkbox("Enable Smart Crawl", value=True)
+            st.session_state.smart_crawl = st.checkbox("Enable Smart Crawl (Highly Recommended)", value=True, help="Prioritizes pages like 'Contact Us' or 'About' to find emails faster and more accurately.")
+            st.session_state.ignore_query_params = st.checkbox("Ignore URLs with Query Parameters", value=True, help="Prevents getting stuck in crawler traps.")
             st.info("Results are saved automatically. You can safely refresh the tab.")
 
         if st.button("🔎 Start Extraction", type="primary"):
@@ -228,8 +234,12 @@ with main_container:
                     return await asyncio.gather(*tasks)
             resolved_urls = asyncio.run(resolve_batch())
 
-            batch_results = run_async_batch(resolved_urls, CRAWL_DEPTH, st.session_state.get('smart_crawl', True))
+            batch_results = run_async_batch(resolved_urls, CRAWL_DEPTH, st.session_state.get('smart_crawl', True), st.session_state.get('ignore_query_params', True))
             
+            # --- নতুন লজিক: অগ্রাধিকারপ্রাপ্ত এবং সাধারণ লিঙ্ক আলাদাভাবে যোগ করা ---
+            all_priority_links = set()
+            all_regular_links = set()
+
             for url, emails, priority_links, regular_links, status in batch_results:
                 st.session_state.visited_urls.add(url)
                 st.session_state.all_emails.update(emails)
@@ -248,21 +258,21 @@ with main_container:
                     st.session_state.failed_urls.append(url)
                 
                 if CRAWL_DEPTH > 0:
-                    st.session_state.urls_to_visit.update(set(priority_links) - st.session_state.visited_urls)
-                    if st.session_state.get('smart_crawl', True):
-                        base_domain = urlparse(url).netloc
-                        if base_domain not in st.session_state.domain_link_counts:
-                            st.session_state.domain_link_counts[base_domain] = 0
-                        allowed_links = []
-                        for link in regular_links:
-                            if st.session_state.domain_link_counts[base_domain] < MAX_INTERNAL_LINKS_PER_DOMAIN and link not in st.session_state.visited_urls:
-                                allowed_links.append(link)
-                                st.session_state.domain_link_counts[base_domain] += 1
-                            else:
-                                break
-                        st.session_state.urls_to_visit.update(set(allowed_links))
-                    else:
-                        st.session_state.urls_to_visit.update(set(regular_links) - st.session_state.visited_urls)
+                    all_priority_links.update(set(priority_links) - st.session_state.visited_urls)
+                    all_regular_links.update(set(regular_links) - st.session_state.visited_urls)
+
+            # প্রথমে অগ্রাধিকারপ্রাপ্ত লিঙ্কগুলো কিউতে যোগ করা
+            st.session_state.urls_to_visit.update(all_priority_links)
+            # তারপর সাধারণ লিঙ্কগুলো যোগ করা, কিন্তু ডোমেইন লিমিট মেনে
+            for link in all_regular_links:
+                domain = urlparse(link).netloc
+                if st.session_state.domain_visit_counts.get(domain, 0) < MAX_URLS_PER_DOMAIN:
+                    st.session_state.urls_to_visit.add(link)
+
+            # প্রসেস হওয়ার পর ডোমেইন ভিজিট কাউন্ট আপডেট করা
+            for url in resolved_urls:
+                domain = urlparse(url).netloc
+                st.session_state.domain_visit_counts[domain] = st.session_state.domain_visit_counts.get(domain, 0) + 1
 
             st.session_state.processed_count += len(current_batch)
             st.session_state.total_urls_found = len(st.session_state.visited_urls) + len(st.session_state.urls_to_visit)
