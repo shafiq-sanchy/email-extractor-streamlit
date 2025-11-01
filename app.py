@@ -171,8 +171,11 @@ with col3:
 
 # --- Main Logic ---
 if st.session_state.is_running:
-    progress = st.session_state.processed_count / st.session_state.total_urls_found if st.session_state.total_urls_found > 0 else 0
+    # --- সংশোধিত অংশ: প্রোগ্রেস ভ্যালুকে সীমাবদ্ধ করা হয়েছে ---
+    progress_value = st.session_state.processed_count / st.session_state.total_urls_found if st.session_state.total_urls_found > 0 else 0
+    progress = min(1.0, max(0.0, progress_value))
     progress_bar = st.progress(progress)
+    
     status_placeholder = st.empty()
     status_placeholder.markdown(
         f"<div style='background-color:#f0f2f6;padding:10px;border-radius:5px;'>"
@@ -221,7 +224,6 @@ if st.session_state.is_running:
                 st.session_state.failed_urls.append(url)
             
             if CRAWL_DEPTH > 0:
-                # --- সংশোধিত অংশ: list কে set-এ কনভার্ট করা হয়েছে ---
                 st.session_state.urls_to_visit.update(set(priority_links) - st.session_state.visited_urls)
                 if st.session_state.get('smart_crawl', True):
                     base_domain = urlparse(url).netloc
@@ -234,9 +236,9 @@ if st.session_state.is_running:
                             st.session_state.domain_link_counts[base_domain] += 1
                         else:
                             break
-                    st.session_state.urls_to_visit.update(set(allowed_links)) # এখানেও set() যোগ করা হয়েছে
+                    st.session_state.urls_to_visit.update(set(allowed_links))
                 else:
-                    st.session_state.urls_to_visit.update(set(regular_links) - st.session_state.visited_urls) # এখানেও set() যোগ করা হয়েছে
+                    st.session_state.urls_to_visit.update(set(regular_links) - st.session_state.visited_urls)
 
         st.session_state.processed_count += len(current_batch)
         st.session_state.total_urls_found = len(st.session_state.visited_urls) + len(st.session_state.urls_to_visit)
