@@ -14,25 +14,13 @@ MAX_CONCURRENT_REQUESTS = 20
 REQUEST_TIMEOUT = 12
 CRAWL_DEPTH = 1 
 CONTACT_KEYWORDS = [
-    'contact', 'about', 'support', 'get-in-touch', 'reach-us', 'team', 'kontakt', 'contato', 'contatti', 
+    'contact', 'contact-us', 'about', 'support', 'get-in-touch', 'reach-us', 'team', 'kontakt', 'contato', 'contatti', 
     'contacto', 'kontak', 'hubungi', 'liên hệ', '연락처', 'お問い合わせ'
 ]
 SKIP_PATH_KEYWORDS = ['news', 'tag', 'category', 'product', 'shop']
 DEFAULT_MAX_URLS_PER_DOMAIN = 30 
 MAX_QUEUE_SIZE_PER_DOMAIN = 30
 BATCH_SIZE = 20
-
-# --- Added headers to make requests look like they're coming from a real browser ---
-# This helps with websites that block automated requests
-HEADERS = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-    'Accept-Language': 'en-US,en;q=0.5',
-    'Referer': 'https://www.google.com/',
-    'DNT': '1',
-    'Connection': 'keep-alive',
-    'Upgrade-Insecure-Requests': '1',
-}
 
 # --- File and Session State Management ---
 RESULTS_DIR = "temp_results"
@@ -109,6 +97,14 @@ async def resolve_url(session, url):
         except Exception:
             return url
 
+def clean_email(email):
+    """Clean up email by removing extra characters before or after the email address."""
+    # Find the email pattern in the string
+    match = re.search(r'\b[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}\b', email)
+    if match:
+        return match.group(0)
+    return email
+
 async def scrape_and_extract_emails(session, url, depth, smart_crawl, ignore_query_params):
     found_emails = set()
     priority_links = set()
@@ -123,25 +119,34 @@ async def scrape_and_extract_emails(session, url, depth, smart_crawl, ignore_que
                     href = a_tag['href']
                     if href.startswith('mailto:'):
                         email = href.replace('mailto:', '').split('?')[0].strip()
+                        email = clean_email(email)
                         found_emails.add(email)
                 
                 for a_tag in soup.find_all('a'):
                     link_text = a_tag.get_text()
                     emails_in_text = re.findall(r'\b[a-zA-Z][a-zA-Z0-9._%+-]*@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}\b', link_text)
-                    found_emails.update(emails_in_text)
+                    for email in emails_in_text:
+                        email = clean_email(email)
+                        found_emails.add(email)
 
                 page_text = soup.get_text() + " ".join([tag.string for tag in soup.find_all('script') if tag.string])
                 emails_in_text = re.findall(r'\b[a-zA-Z][a-zA-Z0-9._%+-]*@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}\b', page_text)
-                found_emails.update(emails_in_text)
+                for email in emails_in_text:
+                    email = clean_email(email)
+                    found_emails.add(email)
 
                 for form in soup.find_all('form'):
                     action = form.get('action', '')
                     emails_in_action = re.findall(r'\b[a-zA-Z][a-zA-Z0-9._%+-]*@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}\b', action)
-                    found_emails.update(emails_in_action)
+                    for email in emails_in_action:
+                        email = clean_email(email)
+                        found_emails.add(email)
                     for input_tag in form.find_all('input', type='hidden'):
                         value = input_tag.get('value', '')
                         emails_in_value = re.findall(r'\b[a-zA-Z][a-zA-Z0-9._%+-]*@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}\b', value)
-                        found_emails.update(emails_in_value)
+                        for email in emails_in_value:
+                            email = clean_email(email)
+                            found_emails.add(email)
 
                 if depth > 0:
                     base_domain = urlparse(url).netloc
@@ -182,8 +187,7 @@ async def process_url_wrapper(session, url, depth, smart_crawl, ignore_query_par
 
 def run_async_batch(batch, depth, smart_crawl, ignore_query_params):
     async def _run():
-        # Added headers to make requests look like they're coming from a real browser
-        async with aiohttp.ClientSession(headers=HEADERS) as session:
+        async with aiohttp.ClientSession() as session:
             tasks = [process_url_wrapper(session, url, depth, smart_crawl, ignore_query_params) for url in batch]
             return await asyncio.gather(*tasks)
     return asyncio.run(_run())
@@ -287,8 +291,7 @@ with main_container:
 
             resolved_urls = []
             async def resolve_batch():
-                # Added headers to make requests look like they're coming from a real browser
-                async with aiohttp.ClientSession(headers=HEADERS) as session:
+                async with aiohttp.ClientSession() as session:
                     tasks = [resolve_url(session, normalize_url(url)) for url in current_batch]
                     return await asyncio.gather(*tasks)
             resolved_urls = asyncio.run(resolve_batch())
@@ -344,4 +347,37 @@ with main_container:
         
         # Display email count prominently
         email_count = len(st.session_state.all_emails)
-        st.markdown(f"<p style='font-size: 20px; font-weight
+        st.markdown(f"<p style='font-size: 20px; font-weight: bold; color: green;'>Total Emails Found: {email_count}</p>", unsafe_allow_html=True)
+        
+        if st.session_state.all_emails:
+            st.subheader("📋 All Emails (Copy)")
+            emails_string = "\n".join(sorted(list(st.session_state.all_emails.keys())))
+            st.text_area("All unique emails found:", value=emails_string, height=200)
+            st.subheader("💾 Download as CSV")
+            
+            # Create DataFrame with email and source URL
+            data = []
+            for email, source in st.session_state.all_emails.items():
+                data.append({"Email": email, "Source URL": source})
+            
+            df = pd.DataFrame(data)
+            csv = df.to_csv(index=False).encode('utf-8')
+            st.download_button(label="Download emails.csv", data=csv, file_name='extracted_emails.csv', mime='text/csv')
+        else:
+            st.info("No emails were found.")
+
+        if st.session_state.failed_urls or st.session_state.timeout_urls:
+            st.subheader("🔍 Analysis of Failed URLs")
+            col1, col2 = st.columns(2)
+            with col1:
+                if st.session_state.timeout_urls: st.warning(f"**{len(st.session_state.timeout_urls)} URLs Timed Out:**"); st.text("\n".join(st.session_state.timeout_urls))
+            with col2:
+                if st.session_state.failed_urls: st.error(f"**{len(st.session_state.failed_urls)} URLs Failed:**"); st.text("\n".join(st.session_state.failed_urls))
+            st.info("💡 You can copy these URLs and exclude them from your next run to save time.")
+        
+        if st.button("🗑️ Clear Results & Start New Search"):
+            clear_results_file(st.session_state.result_file_id)
+            for key in list(st.session_state.keys()):
+                del st.session_state[key]
+            initialize_session_state()
+            st.rerun()
