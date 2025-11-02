@@ -9,11 +9,12 @@ import time
 import json
 import os
 
+# --- Configuration ---
 MAX_CONCURRENT_REQUESTS = 20
 REQUEST_TIMEOUT = 12
 CRAWL_DEPTH = 1 
 CONTACT_KEYWORDS = [
-    'contact', 'about', 'contact-us', 'support', 'get-in-touch', 'reach-us', 'team', 'kontakt', 'contato', 'contatti', 
+    'contact', 'about', 'support', 'get-in-touch', 'reach-us', 'team', 'kontakt', 'contato', 'contatti', 
     'contacto', 'kontak', 'hubungi', 'liên hệ', '연락처', 'お問い合わせ'
 ]
 SKIP_PATH_KEYWORDS = ['blog', 'post', 'article', 'news', 'tag', 'category', 'product', 'shop']
@@ -21,25 +22,13 @@ DEFAULT_MAX_URLS_PER_DOMAIN = 30
 MAX_QUEUE_SIZE_PER_DOMAIN = 30
 BATCH_SIZE = 20
 
-# Added headers to make requests look like they're coming from a real browser
-HEADERS = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-    'Accept-Language': 'en-US,en;q=0.5',
-    'Referer': 'https://www.google.com/',
-    'DNT': '1',
-    'Connection': 'keep-alive',
-    'Upgrade-Insecure-Requests': '1',
-}
-
 # --- File and Session State Management ---
 RESULTS_DIR = "temp_results"
 if not os.path.exists(RESULTS_DIR):
     os.makedirs(RESULTS_DIR)
 
 def save_results_to_file(results, failed, timeout, file_id):
-    # Changed to store email with source URL
-    data = {"results": list(results.items()), "failed_urls": failed, "timeout_urls": timeout}
+    data = {"results": results, "failed_urls": failed, "timeout_urls": timeout}
     with open(os.path.join(RESULTS_DIR, f"{file_id}.json"), "w") as f:
         json.dump(data, f)
 
@@ -47,11 +36,9 @@ def load_results_from_file(file_id):
     try:
         with open(os.path.join(RESULTS_DIR, f"{file_id}.json"), "r") as f:
             data = json.load(f)
-        # Convert list of tuples back to dict
-        results_dict = dict(data.get("results", []))
-        return results_dict, data.get("failed_urls", []), data.get("timeout_urls", [])
+        return data.get("results", []), data.get("failed_urls", []), data.get("timeout_urls", [])
     except (FileNotFoundError, json.JSONDecodeError):
-        return {}, [], []
+        return [], [], []
 
 def clear_results_file(file_id):
     try:
@@ -63,7 +50,7 @@ def clear_results_file(file_id):
 def initialize_session_state():
     defaults = {
         'is_running': False, 'stop_extraction': False, 'extraction_complete': False, 'result_file_id': None,
-        'urls_to_visit': set(), 'visited_urls': set(), 'all_emails': {},  # Changed from set to dict to store email-source mapping
+        'urls_to_visit': set(), 'visited_urls': set(), 'all_emails': set(),
         'failed_urls': [], 'timeout_urls': [], 'domain_visit_counts': {}, 'processed_count': 0, 'total_urls_found': 0,
         'debug_mode': False
     }
@@ -77,7 +64,7 @@ initialize_session_state()
 if st.session_state.result_file_id and not st.session_state.is_running and not st.session_state.extraction_complete:
     loaded_results, loaded_failed, loaded_timeout = load_results_from_file(st.session_state.result_file_id)
     if loaded_results or loaded_failed or loaded_timeout:
-        st.session_state.all_emails = loaded_results
+        st.session_state.results = loaded_results
         st.session_state.failed_urls = loaded_failed
         st.session_state.timeout_urls = loaded_timeout
         st.session_state.extraction_complete = True
@@ -96,36 +83,16 @@ def normalize_url(url):
     """Removes the fragment (#) from a URL to prevent infinite loops on the same page."""
     return url.split('#')[0]
 
-# --- UPDATED and MORE ROBUST resolve_url function ---
-async def resolve_url(session, url, max_redirects=5):
-    current_url = url
-    for _ in range(max_redirects):
+async def resolve_url(session, url):
+    try:
+        async with session.head(url, allow_redirects=True, timeout=REQUEST_TIMEOUT) as response:
+            return str(response.url)
+    except Exception:
         try:
-            # Using GET is generally more reliable for following redirects than HEAD
-            async with session.get(current_url, timeout=REQUEST_TIMEOUT, allow_redirects=False) as response:
-                if response.status in (301, 302, 303, 307, 308):
-                    redirect_url = response.headers.get('Location')
-                    if redirect_url:
-                        # Handle relative redirects
-                        current_url = urljoin(current_url, redirect_url)
-                    else:
-                        # No Location header, stop redirecting
-                        break
-                else:
-                    # No redirect status code, we've reached the final destination
-                    return current_url
+            async with session.get(url, allow_redirects=True, timeout=REQUEST_TIMEOUT) as response:
+                return str(response.url)
         except Exception:
-            # If any request fails, return the last known URL
-            return current_url
-    return current_url # Return after max_redirects
-
-def clean_email(email):
-    """Clean up email by removing extra characters before or after the email address."""
-    # Find the email pattern in the string
-    match = re.search(r'\b[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}\b', email)
-    if match:
-        return match.group(0)
-    return email
+            return url
 
 async def scrape_and_extract_emails(session, url, depth, smart_crawl, ignore_query_params):
     found_emails = set()
@@ -141,39 +108,25 @@ async def scrape_and_extract_emails(session, url, depth, smart_crawl, ignore_que
                     href = a_tag['href']
                     if href.startswith('mailto:'):
                         email = href.replace('mailto:', '').split('?')[0].strip()
-                        email = clean_email(email)
-                        if email:
-                            found_emails.add(email)
+                        found_emails.add(email)
                 
                 for a_tag in soup.find_all('a'):
                     link_text = a_tag.get_text()
                     emails_in_text = re.findall(r'\b[a-zA-Z][a-zA-Z0-9._%+-]*@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}\b', link_text)
-                    for email in emails_in_text:
-                        email = clean_email(email)
-                        if email:
-                            found_emails.add(email)
+                    found_emails.update(emails_in_text)
 
                 page_text = soup.get_text() + " ".join([tag.string for tag in soup.find_all('script') if tag.string])
                 emails_in_text = re.findall(r'\b[a-zA-Z][a-zA-Z0-9._%+-]*@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}\b', page_text)
-                for email in emails_in_text:
-                    email = clean_email(email)
-                    if email:
-                        found_emails.add(email)
+                found_emails.update(emails_in_text)
 
                 for form in soup.find_all('form'):
                     action = form.get('action', '')
                     emails_in_action = re.findall(r'\b[a-zA-Z][a-zA-Z0-9._%+-]*@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}\b', action)
-                    for email in emails_in_action:
-                        email = clean_email(email)
-                        if email:
-                            found_emails.add(email)
+                    found_emails.update(emails_in_action)
                     for input_tag in form.find_all('input', type='hidden'):
                         value = input_tag.get('value', '')
                         emails_in_value = re.findall(r'\b[a-zA-Z][a-zA-Z0-9._%+-]*@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}\b', value)
-                        for email in emails_in_value:
-                            email = clean_email(email)
-                            if email:
-                                found_emails.add(email)
+                        found_emails.update(emails_in_value)
 
                 if depth > 0:
                     base_domain = urlparse(url).netloc
@@ -214,8 +167,7 @@ async def process_url_wrapper(session, url, depth, smart_crawl, ignore_query_par
 
 def run_async_batch(batch, depth, smart_crawl, ignore_query_params):
     async def _run():
-        # Added headers to make requests look like they're coming from a real browser
-        async with aiohttp.ClientSession(headers=HEADERS) as session:
+        async with aiohttp.ClientSession() as session:
             tasks = [process_url_wrapper(session, url, depth, smart_crawl, ignore_query_params) for url in batch]
             return await asyncio.gather(*tasks)
     return asyncio.run(_run())
@@ -289,7 +241,7 @@ with main_container:
         if st.session_state.stop_extraction or not st.session_state.urls_to_visit:
             st.session_state.is_running = False
             st.session_state.extraction_complete = True
-            save_results_to_file(st.session_state.all_emails, st.session_state.failed_urls, st.session_state.timeout_urls, st.session_state.result_file_id)
+            save_results_to_file(list(st.session_state.all_emails), st.session_state.failed_urls, st.session_state.timeout_urls, st.session_state.result_file_id)
             st.rerun()
         else:
             current_batch_size = 1 if st.session_state.debug_mode else BATCH_SIZE
@@ -319,8 +271,7 @@ with main_container:
 
             resolved_urls = []
             async def resolve_batch():
-                # Added headers to make requests look like they're coming from a real browser
-                async with aiohttp.ClientSession(headers=HEADERS) as session:
+                async with aiohttp.ClientSession() as session:
                     tasks = [resolve_url(session, normalize_url(url)) for url in current_batch]
                     return await asyncio.gather(*tasks)
             resolved_urls = asyncio.run(resolve_batch())
@@ -329,11 +280,7 @@ with main_container:
             
             for url, emails, priority_links, regular_links, status in batch_results:
                 st.session_state.visited_urls.add(url)
-                
-                # Store emails with their source URL
-                for email in emails:
-                    if email not in st.session_state.all_emails:
-                        st.session_state.all_emails[email] = url
+                st.session_state.all_emails.update(emails)
                 
                 if st.session_state.debug_mode:
                     st.write(f"**URL:** `{url}`")
@@ -374,22 +321,12 @@ with main_container:
         st.success("Extraction finished. Here are your results.")
         st.balloons()
         
-        # Display email count prominently
-        email_count = len(st.session_state.all_emails)
-        st.markdown(f"<p style='font-size: 20px; font-weight: bold; color: green;'>Total Emails Found: {email_count}</p>", unsafe_allow_html=True)
-        
         if st.session_state.all_emails:
             st.subheader("📋 All Emails (Copy)")
-            emails_string = "\n".join(sorted(list(st.session_state.all_emails.keys())))
+            emails_string = "\n".join(sorted(list(st.session_state.all_emails)))
             st.text_area("All unique emails found:", value=emails_string, height=200)
             st.subheader("💾 Download as CSV")
-            
-            # Create DataFrame with email and source URL
-            data = []
-            for email, source in st.session_state.all_emails.items():
-                data.append({"Email": email, "Source URL": source})
-            
-            df = pd.DataFrame(data)
+            df = pd.DataFrame(list(st.session_state.all_emails), columns=["Email"])
             csv = df.to_csv(index=False).encode('utf-8')
             st.download_button(label="Download emails.csv", data=csv, file_name='extracted_emails.csv', mime='text/csv')
         else:
@@ -406,7 +343,7 @@ with main_container:
         
         if st.button("🗑️ Clear Results & Start New Search"):
             clear_results_file(st.session_state.result_file_id)
-            for key in list(st.session_state.keys()):
+            for key in st.session_state.keys():
                 del st.session_state[key]
             initialize_session_state()
             st.rerun()
