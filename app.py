@@ -17,10 +17,22 @@ CONTACT_KEYWORDS = [
     'contact', 'about', 'support', 'get-in-touch', 'reach-us', 'team', 'kontakt', 'contato', 'contatti', 
     'contacto', 'kontak', 'hubungi', 'liên hệ', '연락처', 'お問い合わせ'
 ]
-SKIP_PATH_KEYWORDS = ['blog', 'post', 'article', 'news', 'tag', 'category', 'product', 'shop']
+SKIP_PATH_KEYWORDS = ['news', 'tag', 'category', 'product', 'shop']
 DEFAULT_MAX_URLS_PER_DOMAIN = 30 
 MAX_QUEUE_SIZE_PER_DOMAIN = 30
 BATCH_SIZE = 20
+
+# --- Added headers to make requests look like they're coming from a real browser ---
+# This helps with websites that block automated requests
+HEADERS = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+    'Accept-Language': 'en-US,en;q=0.5',
+    'Referer': 'https://www.google.com/',
+    'DNT': '1',
+    'Connection': 'keep-alive',
+    'Upgrade-Insecure-Requests': '1',
+}
 
 # --- File and Session State Management ---
 RESULTS_DIR = "temp_results"
@@ -28,7 +40,8 @@ if not os.path.exists(RESULTS_DIR):
     os.makedirs(RESULTS_DIR)
 
 def save_results_to_file(results, failed, timeout, file_id):
-    data = {"results": results, "failed_urls": failed, "timeout_urls": timeout}
+    # Changed to store email with source URL
+    data = {"results": list(results.items()), "failed_urls": failed, "timeout_urls": timeout}
     with open(os.path.join(RESULTS_DIR, f"{file_id}.json"), "w") as f:
         json.dump(data, f)
 
@@ -36,9 +49,11 @@ def load_results_from_file(file_id):
     try:
         with open(os.path.join(RESULTS_DIR, f"{file_id}.json"), "r") as f:
             data = json.load(f)
-        return data.get("results", []), data.get("failed_urls", []), data.get("timeout_urls", [])
+        # Convert list of tuples back to dict
+        results_dict = dict(data.get("results", []))
+        return results_dict, data.get("failed_urls", []), data.get("timeout_urls", [])
     except (FileNotFoundError, json.JSONDecodeError):
-        return [], [], []
+        return {}, [], []
 
 def clear_results_file(file_id):
     try:
@@ -50,7 +65,7 @@ def clear_results_file(file_id):
 def initialize_session_state():
     defaults = {
         'is_running': False, 'stop_extraction': False, 'extraction_complete': False, 'result_file_id': None,
-        'urls_to_visit': set(), 'visited_urls': set(), 'all_emails': set(),
+        'urls_to_visit': set(), 'visited_urls': set(), 'all_emails': {},  # Changed from set to dict to store email-source mapping
         'failed_urls': [], 'timeout_urls': [], 'domain_visit_counts': {}, 'processed_count': 0, 'total_urls_found': 0,
         'debug_mode': False
     }
@@ -64,7 +79,7 @@ initialize_session_state()
 if st.session_state.result_file_id and not st.session_state.is_running and not st.session_state.extraction_complete:
     loaded_results, loaded_failed, loaded_timeout = load_results_from_file(st.session_state.result_file_id)
     if loaded_results or loaded_failed or loaded_timeout:
-        st.session_state.results = loaded_results
+        st.session_state.all_emails = loaded_results
         st.session_state.failed_urls = loaded_failed
         st.session_state.timeout_urls = loaded_timeout
         st.session_state.extraction_complete = True
@@ -167,7 +182,8 @@ async def process_url_wrapper(session, url, depth, smart_crawl, ignore_query_par
 
 def run_async_batch(batch, depth, smart_crawl, ignore_query_params):
     async def _run():
-        async with aiohttp.ClientSession() as session:
+        # Added headers to make requests look like they're coming from a real browser
+        async with aiohttp.ClientSession(headers=HEADERS) as session:
             tasks = [process_url_wrapper(session, url, depth, smart_crawl, ignore_query_params) for url in batch]
             return await asyncio.gather(*tasks)
     return asyncio.run(_run())
@@ -241,7 +257,7 @@ with main_container:
         if st.session_state.stop_extraction or not st.session_state.urls_to_visit:
             st.session_state.is_running = False
             st.session_state.extraction_complete = True
-            save_results_to_file(list(st.session_state.all_emails), st.session_state.failed_urls, st.session_state.timeout_urls, st.session_state.result_file_id)
+            save_results_to_file(st.session_state.all_emails, st.session_state.failed_urls, st.session_state.timeout_urls, st.session_state.result_file_id)
             st.rerun()
         else:
             current_batch_size = 1 if st.session_state.debug_mode else BATCH_SIZE
@@ -271,7 +287,8 @@ with main_container:
 
             resolved_urls = []
             async def resolve_batch():
-                async with aiohttp.ClientSession() as session:
+                # Added headers to make requests look like they're coming from a real browser
+                async with aiohttp.ClientSession(headers=HEADERS) as session:
                     tasks = [resolve_url(session, normalize_url(url)) for url in current_batch]
                     return await asyncio.gather(*tasks)
             resolved_urls = asyncio.run(resolve_batch())
@@ -280,7 +297,11 @@ with main_container:
             
             for url, emails, priority_links, regular_links, status in batch_results:
                 st.session_state.visited_urls.add(url)
-                st.session_state.all_emails.update(emails)
+                
+                # Store emails with their source URL
+                for email in emails:
+                    if email not in st.session_state.all_emails:
+                        st.session_state.all_emails[email] = url
                 
                 if st.session_state.debug_mode:
                     st.write(f"**URL:** `{url}`")
@@ -321,29 +342,6 @@ with main_container:
         st.success("Extraction finished. Here are your results.")
         st.balloons()
         
-        if st.session_state.all_emails:
-            st.subheader("📋 All Emails (Copy)")
-            emails_string = "\n".join(sorted(list(st.session_state.all_emails)))
-            st.text_area("All unique emails found:", value=emails_string, height=200)
-            st.subheader("💾 Download as CSV")
-            df = pd.DataFrame(list(st.session_state.all_emails), columns=["Email"])
-            csv = df.to_csv(index=False).encode('utf-8')
-            st.download_button(label="Download emails.csv", data=csv, file_name='extracted_emails.csv', mime='text/csv')
-        else:
-            st.info("No emails were found.")
-
-        if st.session_state.failed_urls or st.session_state.timeout_urls:
-            st.subheader("🔍 Analysis of Failed URLs")
-            col1, col2 = st.columns(2)
-            with col1:
-                if st.session_state.timeout_urls: st.warning(f"**{len(st.session_state.timeout_urls)} URLs Timed Out:**"); st.text("\n".join(st.session_state.timeout_urls))
-            with col2:
-                if st.session_state.failed_urls: st.error(f"**{len(st.session_state.failed_urls)} URLs Failed:**"); st.text("\n".join(st.session_state.failed_urls))
-            st.info("💡 You can copy these URLs and exclude them from your next run to save time.")
-        
-        if st.button("🗑️ Clear Results & Start New Search"):
-            clear_results_file(st.session_state.result_file_id)
-            for key in st.session_state.keys():
-                del st.session_state[key]
-            initialize_session_state()
-            st.rerun()
+        # Display email count prominently
+        email_count = len(st.session_state.all_emails)
+        st.markdown(f"<p style='font-size: 20px; font-weight
