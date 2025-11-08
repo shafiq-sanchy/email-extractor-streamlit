@@ -1,383 +1,480 @@
-import streamlit as st
-import asyncio
-import aiohttp
+# app.py
+"""
+Email Extractor (optimized)
+
+Features:
+- Parallel crawling of multiple websites
+- Robust email extraction (text + mailto)
+- Strong garbage filtering (image-file like, hashed sentry IDs, known noisy domains)
+- Two verification modes: MX-only (fast) and SMTP RCPT (slower; may be blocked)
+- Caching for verification results
+- Safe UI heights and spacing to avoid overlap
+- Optional: add 'dnspython' to requirements for verification
+"""
+
 import re
-import pandas as pd
-from urllib.parse import urljoin, urlparse
-from bs4 import BeautifulSoup
+import io
+import csv
 import time
-import json
-import os
+import smtplib
+from functools import lru_cache
+from urllib.parse import urljoin, urlparse
 
-# --- Configuration ---
-MAX_CONCURRENT_REQUESTS = 20
-REQUEST_TIMEOUT = 12
-CRAWL_DEPTH = 1 
-CONTACT_KEYWORDS = [
-    'contact', 'contact-us', 'about', 'support', 'get-in-touch', 'reach-us', 'team', 'kontakt', 'contato', 'contatti', 
-    'contacto', 'kontak', 'hubungi', 'liên hệ', '연락처', 'お問い合わせ'
+import requests
+from bs4 import BeautifulSoup
+import streamlit as st
+import pandas as pd
+import urllib3
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+
+# Optional DNS resolver (dnspython)
+try:
+    import dns.resolver
+    DNS_AVAILABLE = True
+except Exception:
+    DNS_AVAILABLE = False
+
+# -----------------------
+# Configuration
+# -----------------------
+# stricter regex: ensures at least 2-letter TLD, avoid catching weird partial strings
+EMAIL_REGEX = re.compile(r'[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$', re.I)
+
+# Exclude patterns and domains (customize as needed)
+EXCLUDED_KEYWORDS = ["support@", "account", "filter", "team", "hr", "enquiries", "press@", "job", "career", "sales", "inquiry", "yourname", "john", "example", "fraud", "scam", "privacy@", "no-reply@", "noreply@", "unsubscribe@"]
+EXCLUDED_DOMAINS_SUBSTR = [
+    "sentry", "wixpress", "sentry.wixpress.com", "latofonts", "address", "yourdomain", "err.abtm.io", "sentry-next", "wix", "mysite", "yoursite", "amazonaws", "localhost", "invalid", "example", "website", "2x.png"
 ]
-SKIP_PATH_KEYWORDS = ['news', 'tag', 'category', 'product', 'shop']
-DEFAULT_MAX_URLS_PER_DOMAIN = 30 
-MAX_QUEUE_SIZE_PER_DOMAIN = 30
-BATCH_SIZE = 20
+SKIP_EXTENSIONS = (".png", ".jpg", ".jpeg", "email.com", "the.benhawy", ".gif", ".svg", ".domain", "example", ".webp", ".ico", ".bmp", ".pdf")
 
-# --- File and Session State Management ---
-RESULTS_DIR = "temp_results"
-if not os.path.exists(RESULTS_DIR):
-    os.makedirs(RESULTS_DIR)
+# Concurrency & requests session
+MAX_CRAWL_WORKERS = 12
+MAX_VERIFY_WORKERS = 10
 
-def save_results_to_file(results, failed, timeout, file_id):
-    # Changed to store email with source URL
-    data = {"results": list(results.items()), "failed_urls": failed, "timeout_urls": timeout}
-    with open(os.path.join(RESULTS_DIR, f"{file_id}.json"), "w") as f:
-        json.dump(data, f)
+HEADERS = {"User-Agent": "EmailExtractor/1.0 (+https://example.com)"}
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-def load_results_from_file(file_id):
+session = requests.Session()
+retries = Retry(total=2, backoff_factor=0.2, status_forcelist=[500, 502, 503, 504])
+adapter = HTTPAdapter(max_retries=retries)
+session.mount("http://", adapter)
+session.mount("https://", adapter)
+
+# -----------------------
+# Utility / helper funcs
+# -----------------------
+def normalize_url(url: str) -> str | None:
+    if not url:
+        return None
+    url = url.strip()
+    if not url:
+        return None
+    if not url.lower().startswith(("http://", "https://")):
+        url = "https://" + url
+    return url
+
+def resolve_url(url: str) -> str:
+    """Resolve shortened URL to final; ignore SSL verification issues"""
     try:
-        with open(os.path.join(RESULTS_DIR, f"{file_id}.json"), "r") as f:
-            data = json.load(f)
-        # Convert list of tuples back to dict
-        results_dict = dict(data.get("results", []))
-        return results_dict, data.get("failed_urls", []), data.get("timeout_urls", [])
-    except (FileNotFoundError, json.JSONDecodeError):
-        return {}, [], []
+        resp = session.head(url, allow_redirects=True, headers=HEADERS, timeout=8, verify=False)
+        final = resp.url or url
+        # warm GET (non-fatal)
+        try:
+            session.get(final, headers=HEADERS, timeout=6, verify=False)
+        except Exception:
+            pass
+        return final
+    except Exception:
+        return url
 
-def clear_results_file(file_id):
+HEX_GARBAGE_RE = re.compile(r'^[0-9a-f]{16,}$', re.I)  # local parts that are long hex strings
+
+def looks_like_garbage(email: str) -> bool:
+    """Return True if email looks like machine-generated or obviously invalid for our use."""
+    if not email or " " in email:
+        return True
+    e = email.strip().lower()
+
+    # quick structure check
+    if EMAIL_REGEX.fullmatch(e) is None:
+        return True
+
+    # local and domain parts
     try:
-        os.remove(os.path.join(RESULTS_DIR, f"{file_id}.json"))
-    except FileNotFoundError:
-        pass
-
-# --- Session State Initialization ---
-def initialize_session_state():
-    defaults = {
-        'is_running': False, 'stop_extraction': False, 'extraction_complete': False, 'result_file_id': None,
-        'urls_to_visit': set(), 'visited_urls': set(), 'all_emails': {},  # Changed from set to dict to store email-source mapping
-        'failed_urls': [], 'timeout_urls': [], 'domain_visit_counts': {}, 'processed_count': 0, 'total_urls_found': 0,
-        'debug_mode': False
-    }
-    for key, value in defaults.items():
-        if key not in st.session_state:
-            st.session_state[key] = value
-
-initialize_session_state()
-
-# --- On App Start: Check for existing results ---
-if st.session_state.result_file_id and not st.session_state.is_running and not st.session_state.extraction_complete:
-    loaded_results, loaded_failed, loaded_timeout = load_results_from_file(st.session_state.result_file_id)
-    if loaded_results or loaded_failed or loaded_timeout:
-        st.session_state.all_emails = loaded_results
-        st.session_state.failed_urls = loaded_failed
-        st.session_state.timeout_urls = loaded_timeout
-        st.session_state.extraction_complete = True
-    else:
-        st.session_state.result_file_id = None
-
-# --- Helper Functions ---
-def is_valid_url(url):
-    try:
-        result = urlparse(url)
-        return all([result.scheme, result.netloc])
+        local, domain = e.split("@", 1)
     except ValueError:
+        return True
+
+    # skip if domain ends with a file extension (common scraped image filenames)
+    if any(domain.endswith(ext.lstrip(".")) or domain.endswith(ext) for ext in SKIP_EXTENSIONS):
+        return True
+    # also check if domain string itself contains file extensions sequence (rare)
+    if any(domain.endswith(ext) for ext in SKIP_EXTENSIONS):
+        return True
+
+    # skip if local part is long hex (system IDs)
+    if HEX_GARBAGE_RE.fullmatch(local):
+        return True
+
+    # skip if domain contains known noisy substrings
+    for sub in EXCLUDED_DOMAINS_SUBSTR:
+        if sub in domain:
+            return True
+
+    # skip specific excluded keywords anywhere
+    for kw in EXCLUDED_KEYWORDS:
+        if kw in e:
+            return True
+
+    # skip if domain includes numeric TLD only (extremely rare) or other oddities - leave default
+    return False
+
+def extract_emails_from_html(html: str) -> set:
+    """Extract emails using regex and mailto links; returns set of lowercased emails (raw)."""
+    found = set()
+    if not html:
+        return found
+    # regex on page content (faster)
+    for m in set(EMAIL_REGEX.findall(html)):
+        found.add(m.lower())
+    # parse mailto links
+    try:
+        soup = BeautifulSoup(html, "html.parser")
+        for a in soup.find_all("a", href=True):
+            href = a["href"]
+            if href.lower().startswith("mailto:"):
+                email = href.split("mailto:", 1)[1].split("?")[0].strip().lower()
+                if email:
+                    found.add(email)
+    except Exception:
+        pass
+    return found
+
+# -----------------------
+# Verification utilities
+# -----------------------
+@lru_cache(maxsize=4096)
+def verify_mx_only(domain: str) -> bool:
+    """Return True if domain has MX records. Requires dnspython (dns.resolver)."""
+    if not DNS_AVAILABLE:
+        return False
+    try:
+        answers = dns.resolver.resolve(domain, "MX", lifetime=5)
+        return len(answers) > 0
+    except Exception:
         return False
 
-def normalize_url(url):
-    """Removes the fragment (#) from a URL to prevent infinite loops on the same page."""
-    return url.split('#')[0]
-
-async def resolve_url(session, url):
+@lru_cache(maxsize=4096)
+def verify_smtp_rcpt_cached(email: str) -> str:
+    """Attempt SMTP RCPT TO on domain MX hosts.
+    Returns 'Valid', 'Invalid', or 'Unknown'.
+    This is slow and may be blocked by MTAs; use sparingly.
+    """
+    if not DNS_AVAILABLE:
+        return "DNS missing"
     try:
-        async with session.head(url, allow_redirects=True, timeout=REQUEST_TIMEOUT) as response:
-            return str(response.url)
+        domain = email.split("@", 1)[1]
     except Exception:
-        try:
-            async with session.get(url, allow_redirects=True, timeout=REQUEST_TIMEOUT) as response:
-                return str(response.url)
-        except Exception:
-            return url
+        return "Invalid"
 
-def clean_email(email):
-    """Clean up email by removing extra characters before or after the email address."""
-    # Find the email pattern in the string
-    match = re.search(r'\b[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}\b', email)
-    if match:
-        return match.group(0)
-    return email
-
-async def scrape_and_extract_emails(session, url, depth, smart_crawl, ignore_query_params):
-    found_emails = set()
-    priority_links = set()
-    regular_links = set()
     try:
-        async with session.get(url, timeout=REQUEST_TIMEOUT) as response:
-            if response.status == 200:
-                content = await response.text()
-                soup = BeautifulSoup(content, 'html.parser')
-                
-                for a_tag in soup.find_all('a', href=True):
-                    href = a_tag['href']
-                    if href.startswith('mailto:'):
-                        email = href.replace('mailto:', '').split('?')[0].strip()
-                        email = clean_email(email)
-                        found_emails.add(email)
-                
-                for a_tag in soup.find_all('a'):
-                    link_text = a_tag.get_text()
-                    emails_in_text = re.findall(r'\b[a-zA-Z][a-zA-Z0-9._%+-]*@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}\b', link_text)
-                    for email in emails_in_text:
-                        email = clean_email(email)
-                        found_emails.add(email)
+        mx_records = dns.resolver.resolve(domain, "MX", lifetime=5)
+        mx_hosts = [str(r.exchange).rstrip(".") for r in mx_records]
+    except Exception:
+        return "Invalid"
 
-                page_text = soup.get_text() + " ".join([tag.string for tag in soup.find_all('script') if tag.string])
-                emails_in_text = re.findall(r'\b[a-zA-Z][a-zA-Z0-9._%+-]*@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}\b', page_text)
-                for email in emails_in_text:
-                    email = clean_email(email)
-                    found_emails.add(email)
+    for mx in mx_hosts:
+        try:
+            server = smtplib.SMTP(timeout=6)
+            server.connect(mx)
+            server.helo()  # EHLO/HELO
+            server.mail("verify@" + "example.com")
+            code, _ = server.rcpt(email)
+            server.quit()
+            # 250 accepted; some servers return 251 etc.
+            if isinstance(code, int) and 200 <= code < 300:
+                return "Valid"
+            # 550 typically means mailbox not found
+            if isinstance(code, int) and 500 <= code < 600:
+                return "Invalid"
+        except Exception:
+            continue
+    return "Unknown"
 
-                for form in soup.find_all('form'):
-                    action = form.get('action', '')
-                    emails_in_action = re.findall(r'\b[a-zA-Z][a-zA-Z0-9._%+-]*@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}\b', action)
-                    for email in emails_in_action:
-                        email = clean_email(email)
-                        found_emails.add(email)
-                    for input_tag in form.find_all('input', type='hidden'):
-                        value = input_tag.get('value', '')
-                        emails_in_value = re.findall(r'\b[a-zA-Z][a-zA-Z0-9._%+-]*@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}\b', value)
-                        for email in emails_in_value:
-                            email = clean_email(email)
-                            found_emails.add(email)
+def verify_email(email: str, mode: str = "none") -> str:
+    """
+    mode: 'none' | 'mx' | 'smtp'
+    returns: "Skipped" | "Valid" | "Invalid" | "Unknown" | "DNS missing"
+    """
+    if mode == "none":
+        return "Skipped"
+    # basic structure first
+    if EMAIL_REGEX.fullmatch(email) is None:
+        return "Invalid"
+    try:
+        domain = email.split("@", 1)[1]
+    except Exception:
+        return "Invalid"
 
-                if depth > 0:
-                    base_domain = urlparse(url).netloc
-                    for a_tag in soup.find_all('a', href=True):
-                        link = urljoin(url, a_tag['href'])
-                        normalized_link = normalize_url(link)
-                        parsed_link = urlparse(normalized_link)
+    if mode == "mx":
+        ok = verify_mx_only(domain)
+        return "Valid" if ok else "Invalid"
+    if mode == "smtp":
+        # check MX first
+        if not verify_mx_only(domain):
+            return "Invalid"
+        return verify_smtp_rcpt_cached(email)
+    return "Skipped"
 
-                        if ignore_query_params and parsed_link.query:
-                            continue
-                        
-                        if (parsed_link.netloc != base_domain or
-                            not parsed_link.scheme in ['http', 'https'] or
-                            re.search(r'\.(pdf|jpg|png|zip|doc|xls|css|js|xml)$', normalized_link, re.IGNORECASE) or
-                            normalized_link.startswith('tel:') or normalized_link.startswith('javascript:') or normalized_link == '#' or
-                            any(keyword in parsed_link.path.lower() for keyword in SKIP_PATH_KEYWORDS) or
-                            re.search(r'/page/\d+$', parsed_link.path.lower())):
-                            continue
-                        
-                        if smart_crawl:
-                            link_text = a_tag.get_text().lower()
-                            link_path = parsed_link.path.lower()
-                            if any(keyword in link_text or keyword in link_path for keyword in CONTACT_KEYWORDS):
-                                priority_links.add(normalized_link)
-                            else:
-                                regular_links.add(normalized_link)
-                        else:
-                            regular_links.add(normalized_link)
-    except asyncio.TimeoutError:
-        return list(found_emails), list(priority_links), list(regular_links), "timeout"
-    except Exception as e:
-        return list(found_emails), list(priority_links), list(regular_links), f"error: {str(e)}"
-    return list(found_emails), list(priority_links), list(regular_links), "success"
+# -----------------------
+# Crawling
+# -----------------------
+def crawl_site(url: str, crawl_depth: int = 1, max_pages: int = 30, delay: float = 0.2) -> tuple:
+    """Return (url, set_of_raw_emails)"""
+    parsed = urlparse(url)
+    base_domain = parsed.netloc
+    to_visit = [(url, 0)]
+    seen = set([url])
+    found = set()
+    pages = 0
 
-async def process_url_wrapper(session, url, depth, smart_crawl, ignore_query_params):
-    emails, priority_links, regular_links, status = await scrape_and_extract_emails(session, url, depth, smart_crawl, ignore_query_params)
-    return url, emails, priority_links, regular_links, status
+    while to_visit and pages < max_pages:
+        current, depth = to_visit.pop(0)
+        pages += 1
+        try:
+            r = session.get(current, headers=HEADERS, timeout=10, verify=False)
+            html = r.text
+        except Exception:
+            continue
 
-def run_async_batch(batch, depth, smart_crawl, ignore_query_params):
-    async def _run():
-        async with aiohttp.ClientSession() as session:
-            tasks = [process_url_wrapper(session, url, depth, smart_crawl, ignore_query_params) for url in batch]
-            return await asyncio.gather(*tasks)
-    return asyncio.run(_run())
+        found.update(extract_emails_from_html(html))
 
-# --- Streamlit App UI ---
-st.set_page_config(page_title="Advanced Email Extractor", layout="wide")
-st.title("Advanced Email Extractor")
-st.markdown("")
+        if depth < crawl_depth:
+            try:
+                soup = BeautifulSoup(html, "html.parser")
+                for a in soup.find_all("a", href=True):
+                    href = a["href"].strip()
+                    joined = urljoin(current, href)
+                    p = urlparse(joined)
+                    if p.scheme not in ("http", "https"):
+                        continue
+                    if p.netloc != base_domain:
+                        continue
+                    norm = p._replace(fragment="").geturl()
+                    if norm not in seen:
+                        seen.add(norm)
+                        to_visit.append((norm, depth + 1))
+            except Exception:
+                pass
 
-main_container = st.container()
+        time.sleep(delay)
 
-with main_container:
-    if not st.session_state.is_running:
-        exclude_urls_input = st.text_area("URLs to Exclude (one per line)", height=100, key="exclude_urls", help="Paste any URLs you want the app to completely ignore.")
-        url_input = st.text_area("Enter URLs to Process (one per line)", height=200, key="url_input")
-        
-        with st.expander("⚙️ Advanced Settings (Optional)"):
-            st.session_state.debug_mode = st.checkbox("Enable Debug Mode", value=False, help="Process one URL at a time and show detailed logs.")
-            st.session_state.max_concurrent = st.slider("Max Concurrent Requests", 10, 100, MAX_CONCURRENT_REQUESTS)
-            st.session_state.request_timeout = st.slider("Request Timeout (seconds)", 5, 30, REQUEST_TIMEOUT)
-            st.session_state.crawl_depth = st.slider("Crawling Depth", 0, 2, CRAWL_DEPTH, help="0 = Fastest (only given URLs). 1 = Slower but more thorough.")
-            st.session_state.max_urls_per_domain = st.slider("Max URLs per Domain", 10, 100, DEFAULT_MAX_URLS_PER_DOMAIN, help="Stops crawling a domain after this many pages.")
-            st.session_state.smart_crawl = st.checkbox("Enable Smart Crawl (Highly Recommended)", value=True)
-            st.session_state.ignore_query_params = st.checkbox("Ignore URLs with Query Parameters", value=True)
-            st.info(f"The app now extracts emails from forms and link text, ensuring maximum accuracy.")
+    return url, found
 
-        if st.button("🔎 Start Extraction", type="primary"):
-            urls = [url.strip() for url in url_input.split('\n') if url.strip()]
-            exclude_urls = set(url.strip() for url in exclude_urls_input.split('\n') if url.strip())
-            final_urls = [url for url in urls if url not in exclude_urls]
+# -----------------------
+# Streamlit UI
+# -----------------------
+st.set_page_config(page_title="Email Extractor", layout="wide")
 
-            if final_urls:
-                initialize_session_state()
-                st.session_state.urls_to_visit = set(normalize_url(url) for url in final_urls)
-                st.session_state.total_urls_found = len(st.session_state.urls_to_visit)
-                st.session_state.is_running = True
-                st.session_state.result_file_id = str(time.time())
-                st.rerun()
-            else:
-                st.warning("Please enter at least one valid URL.")
+st.markdown("""
+<div style="margin-bottom:12px;">
+  <h1 style="color:#1F2328;">📧 Email Extractor</h1>
+  <p style="color:#333; font-size:14px;">Paste website URLs (one per line). Use MX-only verification for bulk. SMTP RCPT is slower and may be blocked.</p>
+</div>
+""", unsafe_allow_html=True)
 
-    if st.session_state.is_running:
-        st.subheader("Processing...")
-        
-        if st.session_state.total_urls_found > 0:
-            progress_value = st.session_state.processed_count / st.session_state.total_urls_found
-        else:
-            progress_value = 0.0
-        
-        progress = min(1.0, max(0.0, progress_value))
-        progress_bar = st.progress(progress)
-        
-        status_placeholder = st.empty()
-        status_placeholder.markdown(
-            f"<div style='background-color:#f0f2f6;padding:10px;border-radius:5px;'>"
-            f"<b>Status:</b> Processed: {st.session_state.processed_count} | Found: {len(st.session_state.all_emails)} | Queue: {len(st.session_state.urls_to_visit)}</div>",
-            unsafe_allow_html=True
+with st.container():
+    col1, col2 = st.columns([3, 1])
+    with col1:
+        urls_input = st.text_area("Enter website URLs (one per line)", height=350)
+    with col2:
+        crawl_depth = st.slider("Crawl depth (0=homepage)", 0, 1, 1)
+        max_pages = st.number_input("Max pages per site", 1, 200, 30)
+        delay = st.number_input("Delay between requests (seconds)", 0.0, 5.0, 0.2, 0.1)
+        verify_choice = st.selectbox(
+            "Verify emails",
+            options=["None", "MX only (fast)", "MX+RCPT (slow)"],
+            index=0
         )
+        st.markdown("<small style='color:#666'>MX+RCPT may be slow and sometimes blocked by mail servers.</small>", unsafe_allow_html=True)
 
-        if st.session_state.debug_mode:
-            st.write("--- Debug Info ---")
-            st.write(f"Processed Count: {st.session_state.processed_count}")
-            st.write(f"Total URLs Found: {st.session_state.total_urls_found}")
-            st.write(f"Raw Progress Value: {progress_value}")
-            st.write(f"Clamped Progress Value: {progress}")
-            st.write("-------------------")
+st.markdown("---")
 
-        if st.button("⏹️ Stop Extraction"):
-            st.session_state.stop_extraction = True
+if st.button("🚀 Extract Emails"):
+    # normalize and resolve
+    websites = []
+    for line in urls_input.splitlines():
+        n = normalize_url(line)
+        if n:
+            websites.append(resolve_url(n))
 
-        if st.session_state.stop_extraction or not st.session_state.urls_to_visit:
-            st.session_state.is_running = False
-            st.session_state.extraction_complete = True
-            save_results_to_file(st.session_state.all_emails, st.session_state.failed_urls, st.session_state.timeout_urls, st.session_state.result_file_id)
-            st.rerun()
+    if not websites:
+        st.warning("Please enter at least one URL.")
+    else:
+        st.info(f"⏳ Starting extraction from {len(websites)} website(s)...")
+        all_results = {}
+        unique_emails = set()
+
+        # crawl in parallel
+        with ThreadPoolExecutor(max_workers=MAX_CRAWL_WORKERS) as executor:
+            futures = {executor.submit(crawl_site, url, crawl_depth, max_pages, delay): url for url in websites}
+            for fut in as_completed(futures):
+                url, raw_emails = fut.result()
+                # filter garbage & excluded keywords now
+                cleaned = {e for e in raw_emails if not looks_like_garbage(e)}
+                # also filter EXCLUDED_KEYWORDS explicitly
+                cleaned = {e for e in cleaned if not any(k in e for k in EXCLUDED_KEYWORDS)}
+                all_results[url] = {
+                    "raw": sorted(raw_emails),
+                    "clean": sorted(cleaned)
+                }
+                unique_emails.update(cleaned)
+
+
+
+        
+        
+        # show raw + cleaned per site with safe heights to avoid overlap
+        st.subheader("📋 Extracted Emails per Website")
+        for site, data in all_results.items():
+            st.markdown(f"### 🌐 {site}")
+            raw = data["raw"]
+            clean = data["clean"]
+
+            # Raw (if any)
+            st.markdown("**Raw Emails Found:**")
+            if raw:
+                df_raw = pd.DataFrame({"Email": raw})
+                # safe height calculation
+                rows = max(1, len(df_raw))
+                height = max(180, min(500, 32 * rows))
+                st.dataframe(df_raw, height=height)
+            else:
+                st.markdown("→ No raw emails found.")
+
+            st.markdown("<div style='height:10px'></div>", unsafe_allow_html=True)
+
+            # Clean (if any)
+            st.markdown("**Filtered Emails (cleaned):**")
+            if clean:
+                # prepare df with verification status placeholder
+                df_clean = pd.DataFrame({"Email": clean})
+                rows = max(1, len(df_clean))
+                height = max(180, min(600, 32 * rows))
+                st.dataframe(df_clean, height=height)
+            else:
+                st.markdown("→ No filtered emails found.")
+
+            st.markdown("<div style='height:18px'></div>", unsafe_allow_html=True)
+
+        # Verification step (parallel) if requested
+        mode = "none"
+        if verify_choice == "MX only (fast)":
+            mode = "mx"
+        elif verify_choice == "MX+RCPT (slow)":
+            mode = "smtp"
+
+        verified_map = {}
+        if mode != "none" and unique_emails:
+            st.info("🔎 Verifying emails (parallel). This may take time depending on mode.")
+            # parallel verification with caching
+            with ThreadPoolExecutor(max_workers=MAX_VERIFY_WORKERS) as vexec:
+                futures = {}
+                for e in unique_emails:
+                    if mode == "mx":
+                        # call verify_mx_only via wrapper
+                        futures[vexec.submit(lambda em: (em, "Valid" if verify_mx_only(em.split('@',1)[1]) else "Invalid"), e)] = e
+                    else:
+                        futures[vexec.submit(verify_smtp_rcpt_cached, e)] = e
+                # collect results
+                for fut in as_completed(futures):
+                    # smtp path returns status string; mx path we submitted lambda returning tuple? handle both
+                    res = fut.result()
+                    if isinstance(res, tuple) and len(res) == 2:
+                        email, status = res
+                        verified_map[email] = status
+                    elif isinstance(res, str):
+                        # res corresponds to email passed via futures mapping key
+                        # need to find which email; but we used email as argument, so fut.result() returns string status
+                        # get email from futures dict
+                        email = futures[fut]
+                        # if status from verify_smtp_rcpt_cached
+                        verified_map[email] = res
+                    else:
+                        # fallback
+                        email = futures[fut]
+                        verified_map[email] = "Unknown"
         else:
-            current_batch_size = 1 if st.session_state.debug_mode else BATCH_SIZE
-            current_batch = list(st.session_state.urls_to_visit)[:current_batch_size]
-            st.session_state.urls_to_visit.difference_update(current_batch)
-            
-            should_skip_batch = False
-            max_limit = st.session_state.get('max_urls_per_domain', DEFAULT_MAX_URLS_PER_DOMAIN)
-            
-            for url in current_batch:
-                domain = urlparse(url).netloc
-                if st.session_state.domain_visit_counts.get(domain, 0) >= max_limit:
-                    should_skip_batch = True
-                    break
-            
-            if should_skip_batch:
-                if st.session_state.debug_mode:
-                    st.warning(f"🛑 SKIPPING BATCH: A domain in this batch has reached its visit limit of {max_limit}.")
-                st.session_state.processed_count += len(current_batch)
-                st.session_state.total_urls_found = len(st.session_state.visited_urls) + len(st.session_state.urls_to_visit)
-                time.sleep(0.1)
-                st.rerun()
+            # mark all as skipped
+            for e in unique_emails:
+                verified_map[e] = "Skipped" if mode == "none" else ("Invalid" if not DNS_AVAILABLE else "Unknown")
 
-            if st.session_state.debug_mode:
-                st.write(f"🔍 Processing batch of {len(current_batch)} URL(s):")
-                st.code("\n".join(current_batch))
+        # Final presentation per site with verification status
+        st.subheader("✅ Final Results (with verification status)")
+        valid_count = 0
+        for site, data in all_results.items():
+            clean = data["clean"]
+            if not clean:
+                st.markdown(f"**{site}** → No filtered emails")
+                continue
+            rows = []
+            for e in sorted(clean):
+                status = verified_map.get(e, "Skipped")
+                rows.append({"Email": e, "Verified": status})
+                if status == "Valid":
+                    valid_count += 1
+            df_final = pd.DataFrame(rows)
+            st.markdown(f"**{site}**")
+            height = max(180, min(700, 32 * max(1, len(rows))))
+            st.dataframe(df_final, height=height)
+            st.markdown("<div style='height:12px'></div>", unsafe_allow_html=True)
 
-            resolved_urls = []
-            async def resolve_batch():
-                async with aiohttp.ClientSession() as session:
-                    tasks = [resolve_url(session, normalize_url(url)) for url in current_batch]
-                    return await asyncio.gather(*tasks)
-            resolved_urls = asyncio.run(resolve_batch())
+        # CSV download (prepared once)
+        if unique_emails:
+            csv_buffer = io.StringIO()
+            writer = csv.writer(csv_buffer)
+            writer.writerow(["website", "email", "verified"])
+            for site, data in all_results.items():
+                for e in data["clean"]:
+                    writer.writerow([site, e, verified_map.get(e, "Skipped")])
+            csv_bytes = csv_buffer.getvalue().encode("utf-8")
+            st.markdown("<div style='height:18px'></div>", unsafe_allow_html=True)
+            st.download_button("📥 Download all emails (CSV)", data=csv_bytes, file_name="emails.csv", mime="text/csv")
 
-            batch_results = run_async_batch(resolved_urls, CRAWL_DEPTH, st.session_state.get('smart_crawl', True), st.session_state.get('ignore_query_params', True))
-            
-            for url, emails, priority_links, regular_links, status in batch_results:
-                st.session_state.visited_urls.add(url)
-                
-                # Store emails with their source URL
-                for email in emails:
-                    if email not in st.session_state.all_emails:
-                        st.session_state.all_emails[email] = url
-                
-                if st.session_state.debug_mode:
-                    st.write(f"**URL:** `{url}`")
-                    st.write(f"**Status:** {status}")
-                    st.write(f"**Emails Found:** {len(emails)}")
-                    if emails:
-                        st.code("\n".join(emails))
-                    st.divider()
-
-                if "timeout" in status:
-                    st.session_state.timeout_urls.append(url)
-                elif "error" in status:
-                    st.session_state.failed_urls.append(url)
-                
-                if CRAWL_DEPTH > 0:
-                    all_new_links = set(priority_links) | set(regular_links)
-                    for link in all_new_links:
-                        if link not in st.session_state.visited_urls and link not in st.session_state.urls_to_visit:
-                            domain = urlparse(link).netloc
-                            queue_count_for_domain = sum(1 for u in st.session_state.urls_to_visit if urlparse(u).netloc == domain)
-                            
-                            if queue_count_for_domain < MAX_QUEUE_SIZE_PER_DOMAIN:
-                                st.session_state.urls_to_visit.add(link)
-                            elif st.session_state.debug_mode:
-                                st.warning(f"🛑 SKIPPED: Link `{link}` not added to queue. Queue for domain `{domain}` is full.")
-
-            for url in resolved_urls:
-                domain = urlparse(url).netloc
-                st.session_state.domain_visit_counts[domain] = st.session_state.domain_visit_counts.get(domain, 0) + 1
-
-            st.session_state.processed_count += len(current_batch)
-            st.session_state.total_urls_found = len(st.session_state.visited_urls) + len(st.session_state.urls_to_visit)
-            
-            time.sleep(0.1)
-            st.rerun()
-
-    if st.session_state.extraction_complete:
-        st.success("Extraction finished. Here are your results.")
+        # Finish notification & branding
         st.balloons()
-        
-        # Display email count prominently
-        email_count = len(st.session_state.all_emails)
-        st.markdown(f"<p style='font-size: 20px; font-weight: bold; color: green;'>Total Emails Found: {email_count}</p>", unsafe_allow_html=True)
-        
-        if st.session_state.all_emails:
-            st.subheader("📋 All Emails (Copy)")
-            emails_string = "\n".join(sorted(list(st.session_state.all_emails.keys())))
-            st.text_area("All unique emails found:", value=emails_string, height=200)
-            st.subheader("💾 Download as CSV")
-            
-            # Create DataFrame with email and source URL
-            data = []
-            for email, source in st.session_state.all_emails.items():
-                data.append({"Email": email, "Source URL": source})
-            
-            df = pd.DataFrame(data)
-            csv = df.to_csv(index=False).encode('utf-8')
-            st.download_button(label="Download emails.csv", data=csv, file_name='extracted_emails.csv', mime='text/csv')
-        else:
-            st.info("No emails were found.")
+        st.success(f"🎉 Extraction completed! Unique cleaned emails: {len(unique_emails)} — Valid: {sum(1 for v in verified_map.values() if v == 'Valid')}")
+        st.info("💡 Done by Shafiq Sanchy")
 
-        if st.session_state.failed_urls or st.session_state.timeout_urls:
-            st.subheader("🔍 Analysis of Failed URLs")
-            col1, col2 = st.columns(2)
-            with col1:
-                if st.session_state.timeout_urls: st.warning(f"**{len(st.session_state.timeout_urls)} URLs Timed Out:**"); st.text("\n".join(st.session_state.timeout_urls))
-            with col2:
-                if st.session_state.failed_urls: st.error(f"**{len(st.session_state.failed_urls)} URLs Failed:**"); st.text("\n".join(st.session_state.failed_urls))
-            st.info("💡 You can copy these URLs and exclude them from your next run to save time.")
-        
-        if st.button("🗑️ Clear Results & Start New Search"):
-            clear_results_file(st.session_state.result_file_id)
-            for key in list(st.session_state.keys()):
-                del st.session_state[key]
-            initialize_session_state()
-            st.rerun()
+        # browser notification + sound
+        js_code = f"""
+        <script>
+        function notifyMe() {{
+            if (!("Notification" in window)) {{
+                alert("Extraction done! Total emails: {len(unique_emails)}");
+                return;
+            }}
+            if (Notification.permission !== "granted") Notification.requestPermission();
+            if (Notification.permission === "granted") {{
+                new Notification("Email Extractor", {{
+                    body: "Done! {len(unique_emails)} unique cleaned emails — Valid: {sum(1 for v in verified_map.values() if v == 'Valid')}",
+                    icon: "https://cdn-icons-png.flaticon.com/512/561/561127.png"
+                }});
+            }}
+            var audio = new Audio("https://www.soundjay.com/buttons/sounds/beep-07.mp3");
+            audio.play();
+        }}
+        notifyMe();
+        </script>
+        """
+        import streamlit.components.v1 as components
+        components.html(js_code, height=0, width=0)
+
+# footer
+st.markdown("""
+<div style="padding:12px; margin-top:32px; text-align:center; font-size:13px; color:#555; border-top:0px solid #eee;">
+© Shafiq Sanchy 2025
+</div>
+""", unsafe_allow_html=True)
