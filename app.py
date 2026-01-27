@@ -1,22 +1,20 @@
 """
-Email Extractor (Ultra Optimized)
+Email Extractor (Ultra Optimized - Enhanced Detection)
 
 Features:
 - Parallel crawling of unlimited websites
-- Fast email extraction (text + mailto)
+- Enhanced email extraction with multiple methods
+- Better URL resolution (handles t.co, bit.ly, etc.)
+- JavaScript content detection
 - Strong garbage filtering
 - Real-time progress tracking
-- URL counter
-- Optimized for large-scale processing
-- Memory efficient batching
 """
 
 import re
 import io
 import csv
 import time
-from urllib.parse import urljoin, urlparse
-from collections import defaultdict
+from urllib.parse import urljoin, urlparse, unquote
 
 import requests
 from bs4 import BeautifulSoup
@@ -30,44 +28,60 @@ from urllib3.util.retry import Retry
 # -----------------------
 # Configuration
 # -----------------------
-EMAIL_REGEX = re.compile(r'[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$', re.I)
+# Multiple regex patterns for better email detection
+EMAIL_PATTERNS = [
+    # Standard email pattern
+    re.compile(r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b'),
+    # Email with spaces (sometimes in HTML)
+    re.compile(r'\b[A-Za-z0-9._%+-]+\s*@\s*[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b'),
+    # Email in text format
+    re.compile(r'\b[A-Za-z0-9._%+-]+\s*\[\s*at\s*\]\s*[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b', re.I),
+    # Email with [dot]
+    re.compile(r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\s*\[\s*dot\s*\]\s*[A-Z|a-z]{2,}\b', re.I),
+]
 
-# Exclude patterns and domains
+# Exclude patterns (reduced to avoid over-filtering)
 EXCLUDED_KEYWORDS = [
-    "support@", "account", "filter", "team", "hr", "enquiries", "press@", 
-    "job", "career", "sales", "inquiry", "yourname", "john", "example", 
-    "fraud", "scam", "privacy@", "no-reply@", "noreply@", "unsubscribe@"
+    "example.com", "example.org", "yourname", "yourdomain", 
+    "yoursite", "mysite", "test@", "email@example"
 ]
 
 EXCLUDED_DOMAINS_SUBSTR = [
-    "sentry", "wixpress", "latofonts", "address", "yourdomain", 
-    "err.abtm.io", "sentry-next", "wix", "mysite", "yoursite", 
-    "amazonaws", "localhost", "invalid", "example", "website"
+    "sentry.io", "wixpress.com", "amazonaws.com", 
+    "localhost", "127.0.0.1", "0.0.0.0"
 ]
 
 SKIP_EXTENSIONS = (
-    ".png", ".jpg", ".jpeg", "email.com", "the.benhawy", ".gif", 
-    ".svg", ".domain", "example", ".webp", ".ico", ".bmp", ".pdf"
+    ".png", ".jpg", ".jpeg", ".gif", ".svg", 
+    ".webp", ".ico", ".bmp", ".pdf", ".css", ".js"
 )
 
-# Optimized concurrency settings
-MAX_CRAWL_WORKERS = 20  # Increased for faster processing
-BATCH_SIZE = 50  # Process URLs in batches to avoid memory issues
-REQUEST_TIMEOUT = 8  # Reduced timeout for faster failures
+# Optimized settings
+MAX_CRAWL_WORKERS = 20
+BATCH_SIZE = 50
+REQUEST_TIMEOUT = 15  # Increased for better success rate
+MAX_REDIRECTS = 10
 
-HEADERS = {"User-Agent": "EmailExtractor/2.0 (+https://example.com)"}
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.5",
+    "Accept-Encoding": "gzip, deflate",
+    "Connection": "keep-alive",
+}
+
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-# Optimized session with connection pooling
+# Optimized session
 session = requests.Session()
 retries = Retry(
-    total=2, 
-    backoff_factor=0.1,  # Faster retry
-    status_forcelist=[500, 502, 503, 504]
+    total=3,
+    backoff_factor=0.3,
+    status_forcelist=[500, 502, 503, 504, 429]
 )
 adapter = HTTPAdapter(
-    max_retries=retries, 
-    pool_connections=100,  # Increased pool
+    max_retries=retries,
+    pool_connections=100,
     pool_maxsize=100
 )
 session.mount("http://", adapter)
@@ -83,30 +97,81 @@ def normalize_url(url: str) -> str | None:
     url = url.strip()
     if not url:
         return None
+    # Remove any whitespace
+    url = url.replace(" ", "")
     if not url.lower().startswith(("http://", "https://")):
         url = "https://" + url
     return url
 
-def quick_url_check(url: str) -> str:
-    """Quick URL validation without full resolution - much faster"""
+def resolve_url(url: str, max_redirects: int = MAX_REDIRECTS) -> str:
+    """Resolve shortened URLs (t.co, bit.ly, etc.) to final destination"""
     try:
-        parsed = urlparse(url)
-        if not parsed.netloc:
-            return url
-        return url
-    except Exception:
+        # Follow redirects to get final URL
+        response = session.head(
+            url, 
+            allow_redirects=True, 
+            headers=HEADERS, 
+            timeout=REQUEST_TIMEOUT,
+            verify=False
+        )
+        final_url = response.url
+        
+        # If head didn't work, try GET
+        if not final_url or final_url == url:
+            response = session.get(
+                url,
+                allow_redirects=True,
+                headers=HEADERS,
+                timeout=REQUEST_TIMEOUT,
+                verify=False,
+                stream=True
+            )
+            final_url = response.url
+        
+        return final_url if final_url else url
+    except Exception as e:
+        # If resolution fails, return original URL
         return url
 
-HEX_GARBAGE_RE = re.compile(r'^[0-9a-f]{16,}$', re.I)
+def normalize_email(email: str) -> str:
+    """Normalize email address"""
+    email = email.strip().lower()
+    # Remove common obfuscations
+    email = re.sub(r'\s+', '', email)  # Remove spaces
+    email = re.sub(r'\[at\]', '@', email, flags=re.I)
+    email = re.sub(r'\[dot\]', '.', email, flags=re.I)
+    email = re.sub(r'\(at\)', '@', email, flags=re.I)
+    email = re.sub(r'\(dot\)', '.', email, flags=re.I)
+    return email
+
+def is_valid_email(email: str) -> bool:
+    """Basic email validation"""
+    if not email or len(email) < 5:
+        return False
+    if email.count('@') != 1:
+        return False
+    
+    try:
+        local, domain = email.split('@')
+        if not local or not domain:
+            return False
+        if '.' not in domain:
+            return False
+        if len(local) > 64 or len(domain) > 255:
+            return False
+        return True
+    except:
+        return False
 
 def looks_like_garbage(email: str) -> bool:
-    """Fast garbage detection"""
+    """Enhanced garbage detection - less aggressive"""
     if not email or " " in email:
         return True
     
     e = email.strip().lower()
     
-    if EMAIL_REGEX.fullmatch(e) is None:
+    # Basic validation
+    if not is_valid_email(e):
         return True
     
     try:
@@ -114,45 +179,85 @@ def looks_like_garbage(email: str) -> bool:
     except ValueError:
         return True
     
-    # Quick checks first (most common)
-    if any(domain.endswith(ext.lstrip(".")) for ext in SKIP_EXTENSIONS):
+    # Check if domain ends with image extension
+    for ext in SKIP_EXTENSIONS:
+        if domain.endswith(ext.lstrip(".")):
+            return True
+    
+    # Check for very long hex strings (likely system IDs)
+    if len(local) > 20 and re.match(r'^[0-9a-f]+$', local, re.I):
         return True
     
-    if HEX_GARBAGE_RE.fullmatch(local):
-        return True
-    
-    # Check excluded substrings
+    # Check excluded domains
     for sub in EXCLUDED_DOMAINS_SUBSTR:
         if sub in domain:
             return True
     
-    # Check keywords
+    # Check excluded keywords (only exact matches now)
     for kw in EXCLUDED_KEYWORDS:
-        if kw in e:
+        if kw == e or e.startswith(kw):
             return True
     
     return False
 
-def extract_emails_from_html(html: str) -> set:
-    """Fast email extraction from HTML"""
+def extract_emails_from_html(html: str, url: str = "") -> set:
+    """Enhanced email extraction with multiple methods"""
     found = set()
     if not html:
         return found
     
-    # Regex extraction (faster)
-    for m in EMAIL_REGEX.findall(html):
-        found.add(m.lower())
+    # Method 1: Multiple regex patterns
+    for pattern in EMAIL_PATTERNS:
+        matches = pattern.findall(html)
+        for match in matches:
+            normalized = normalize_email(match)
+            if is_valid_email(normalized):
+                found.add(normalized)
     
-    # Parse mailto links
+    # Method 2: Parse mailto links
     try:
         soup = BeautifulSoup(html, "html.parser")
+        
+        # Extract from mailto links
         for a in soup.find_all("a", href=True):
             href = a["href"]
             if href.lower().startswith("mailto:"):
-                email = href.split("mailto:", 1)[1].split("?")[0].strip().lower()
-                if email:
-                    found.add(email)
-    except Exception:
+                email = href.split("mailto:", 1)[1].split("?")[0].strip()
+                normalized = normalize_email(email)
+                if is_valid_email(normalized):
+                    found.add(normalized)
+        
+        # Method 3: Look for emails in text content
+        all_text = soup.get_text()
+        for pattern in EMAIL_PATTERNS:
+            matches = pattern.findall(all_text)
+            for match in matches:
+                normalized = normalize_email(match)
+                if is_valid_email(normalized):
+                    found.add(normalized)
+        
+        # Method 4: Check meta tags
+        for meta in soup.find_all("meta"):
+            content = meta.get("content", "")
+            if "@" in content:
+                for pattern in EMAIL_PATTERNS:
+                    matches = pattern.findall(content)
+                    for match in matches:
+                        normalized = normalize_email(match)
+                        if is_valid_email(normalized):
+                            found.add(normalized)
+        
+        # Method 5: Check for obfuscated emails in comments
+        comments = soup.find_all(string=lambda text: isinstance(text, str) and '@' in text)
+        for comment in comments:
+            for pattern in EMAIL_PATTERNS:
+                matches = pattern.findall(str(comment))
+                for match in matches:
+                    normalized = normalize_email(match)
+                    if is_valid_email(normalized):
+                        found.add(normalized)
+    
+    except Exception as e:
         pass
     
     return found
@@ -161,12 +266,15 @@ def extract_emails_from_html(html: str) -> set:
 # Optimized Crawling
 # -----------------------
 def crawl_site(url: str, crawl_depth: int, max_pages: int, delay: float) -> tuple:
-    """Optimized crawling with better error handling"""
+    """Enhanced crawling with better email detection"""
     try:
-        parsed = urlparse(url)
+        # First resolve the URL if it's shortened
+        resolved_url = resolve_url(url)
+        
+        parsed = urlparse(resolved_url)
         base_domain = parsed.netloc
-        to_visit = [(url, 0)]
-        seen = {url}
+        to_visit = [(resolved_url, 0)]
+        seen = {resolved_url}
         found = set()
         pages = 0
         
@@ -175,19 +283,28 @@ def crawl_site(url: str, crawl_depth: int, max_pages: int, delay: float) -> tupl
             pages += 1
             
             try:
+                # Try to get the page
                 r = session.get(
-                    current, 
-                    headers=HEADERS, 
-                    timeout=REQUEST_TIMEOUT, 
+                    current,
+                    headers=HEADERS,
+                    timeout=REQUEST_TIMEOUT,
                     verify=False,
                     allow_redirects=True
                 )
+                
+                # Check if response is HTML
+                content_type = r.headers.get('Content-Type', '')
+                if 'text/html' not in content_type.lower():
+                    continue
+                
                 html = r.text
-            except Exception:
+                
+                # Extract emails with enhanced method
+                emails = extract_emails_from_html(html, current)
+                found.update(emails)
+                
+            except Exception as e:
                 continue
-            
-            # Extract emails
-            found.update(extract_emails_from_html(html))
             
             # Crawl deeper if needed
             if depth < crawl_depth:
@@ -195,12 +312,21 @@ def crawl_site(url: str, crawl_depth: int, max_pages: int, delay: float) -> tupl
                     soup = BeautifulSoup(html, "html.parser")
                     for a in soup.find_all("a", href=True):
                         href = a["href"].strip()
+                        
+                        # Skip javascript, mailto, tel links
+                        if href.startswith(('javascript:', 'mailto:', 'tel:')):
+                            continue
+                        
                         joined = urljoin(current, href)
                         p = urlparse(joined)
                         
                         if p.scheme not in ("http", "https"):
                             continue
                         if p.netloc != base_domain:
+                            continue
+                        
+                        # Skip files
+                        if any(joined.lower().endswith(ext) for ext in SKIP_EXTENSIONS):
                             continue
                         
                         norm = p._replace(fragment="").geturl()
@@ -210,7 +336,7 @@ def crawl_site(url: str, crawl_depth: int, max_pages: int, delay: float) -> tupl
                 except Exception:
                     pass
             
-            # Small delay to avoid overwhelming servers
+            # Small delay
             if delay > 0:
                 time.sleep(delay)
         
@@ -222,12 +348,12 @@ def crawl_site(url: str, crawl_depth: int, max_pages: int, delay: float) -> tupl
 # -----------------------
 # Streamlit UI
 # -----------------------
-st.set_page_config(page_title="Email Extractor - Optimized", layout="wide")
+st.set_page_config(page_title="Email Extractor - Enhanced", layout="wide")
 
 st.markdown("""
 <div style="margin-bottom:12px;">
-  <h1 style="color:#1F2328;">📧 Email Extractor (Optimized)</h1>
-  <p style="color:#333; font-size:14px;">Fast bulk email extraction from unlimited websites. Optimized for large-scale processing.</p>
+  <h1 style="color:#1F2328;">📧 Email Extractor (Enhanced Detection)</h1>
+  <p style="color:#333; font-size:14px;">Fast bulk email extraction with improved detection. Handles shortened URLs and JavaScript content.</p>
 </div>
 """, unsafe_allow_html=True)
 
@@ -237,9 +363,9 @@ with st.container():
     
     with col1:
         urls_input = st.text_area(
-            "Enter website URLs (one per line)", 
+            "Enter website URLs (one per line)",
             height=350,
-            help="Paste URLs here. Supports unlimited URLs with batch processing."
+            help="Paste URLs here. Supports t.co, bit.ly and other shortened URLs."
         )
         
         # URL Counter
@@ -251,11 +377,11 @@ with st.container():
             st.markdown(f"<p style='color:#999; font-size:13px; margin-top:-10px;'>📊 Total URLs entered: <strong>0</strong></p>", unsafe_allow_html=True)
     
     with col2:
-        crawl_depth = st.slider("Crawl depth (0=homepage)", 0, 2, 0)
-        max_pages = st.number_input("Max pages per site", 1, 100, 20)
-        delay = st.number_input("Delay between requests (seconds)", 0.0, 2.0, 0.1, 0.1)
+        crawl_depth = st.slider("Crawl depth", 0, 3, 1, help="0=homepage only, 1=homepage+links, 2+=deeper crawl")
+        max_pages = st.number_input("Max pages per site", 1, 100, 30)
+        delay = st.number_input("Delay (seconds)", 0.0, 2.0, 0.15, 0.05)
         
-        st.markdown("<small style='color:#666'>Lower delay = faster extraction</small>", unsafe_allow_html=True)
+        st.markdown("<small style='color:#666'>Tip: Increase crawl depth to find more emails</small>", unsafe_allow_html=True)
 
 st.markdown("---")
 
@@ -266,7 +392,7 @@ if st.button("🚀 Extract Emails", type="primary"):
     for line in urls_input.splitlines():
         n = normalize_url(line)
         if n:
-            websites.append(quick_url_check(n))
+            websites.append(n)
     
     if not websites:
         st.warning("⚠️ Please enter at least one URL.")
@@ -284,7 +410,7 @@ if st.button("🚀 Extract Emails", type="primary"):
         progress_bar = st.progress(0)
         status_text = st.empty()
         
-        # Process in batches for memory efficiency
+        # Process in batches
         batch_num = 0
         total_batches = (total_urls + BATCH_SIZE - 1) // BATCH_SIZE
         
@@ -295,10 +421,10 @@ if st.button("🚀 Extract Emails", type="primary"):
             
             status_text.markdown(f"**📦 Processing batch {batch_num}/{total_batches}** (URLs {i+1} to {i+batch_size})")
             
-            # Parallel crawling with progress updates
+            # Parallel crawling
             with ThreadPoolExecutor(max_workers=MAX_CRAWL_WORKERS) as executor:
                 futures = {
-                    executor.submit(crawl_site, url, crawl_depth, max_pages, delay): url 
+                    executor.submit(crawl_site, url, crawl_depth, max_pages, delay): url
                     for url in batch
                 }
                 
@@ -312,14 +438,8 @@ if st.button("🚀 Extract Emails", type="primary"):
                     
                     if error:
                         error_count += 1
-                        status_text.markdown(
-                            f"**⏳ Processing:** {processed_count}/{total_urls} | "
-                            f"**✅ Success:** {processed_count - error_count} | "
-                            f"**❌ Errors:** {error_count} | "
-                            f"**📧 Emails found:** {len(unique_emails)}"
-                        )
                     else:
-                        # Filter garbage emails
+                        # Filter garbage emails (less aggressive now)
                         cleaned = {e for e in raw_emails if not looks_like_garbage(e)}
                         
                         all_results[url] = {
@@ -327,15 +447,15 @@ if st.button("🚀 Extract Emails", type="primary"):
                             "clean": sorted(cleaned)
                         }
                         unique_emails.update(cleaned)
-                        
-                        status_text.markdown(
-                            f"**⏳ Processing:** {processed_count}/{total_urls} | "
-                            f"**✅ Success:** {processed_count - error_count} | "
-                            f"**❌ Errors:** {error_count} | "
-                            f"**📧 Emails found:** {len(unique_emails)}"
-                        )
+                    
+                    status_text.markdown(
+                        f"**⏳ Processing:** {processed_count}/{total_urls} | "
+                        f"**✅ Success:** {processed_count - error_count} | "
+                        f"**❌ Errors:** {error_count} | "
+                        f"**📧 Emails found:** {len(unique_emails)}"
+                    )
         
-        # Complete progress
+        # Complete
         progress_bar.progress(1.0)
         status_text.success(
             f"✅ **Completed!** Processed {processed_count}/{total_urls} URLs | "
@@ -345,44 +465,43 @@ if st.button("🚀 Extract Emails", type="primary"):
         
         st.markdown("---")
         
-        # Results section
-        st.subheader("📋 Extraction Results")
-        
         # Summary metrics
         col1, col2, col3, col4 = st.columns(4)
         with col1:
-            st.metric("Total URLs Processed", processed_count)
+            st.metric("Total URLs", processed_count)
         with col2:
-            st.metric("Successful Extractions", processed_count - error_count)
+            st.metric("Successful", processed_count - error_count)
         with col3:
-            st.metric("Total Unique Emails", len(unique_emails))
+            st.metric("Unique Emails", len(unique_emails))
         with col4:
-            st.metric("Failed URLs", error_count)
+            success_rate = ((processed_count - error_count) / processed_count * 100) if processed_count > 0 else 0
+            st.metric("Success Rate", f"{success_rate:.1f}%")
         
         st.markdown("---")
         
-        # Detailed results per website
+        # Detailed results
         if all_results:
-            with st.expander("🔍 View Detailed Results per Website", expanded=False):
+            with st.expander("🔍 View Details per Website", expanded=True):
                 for site, data in all_results.items():
                     clean = data["clean"]
                     raw = data["raw"]
                     
-                    st.markdown(f"### 🌐 {site}")
-                    st.markdown(f"**Raw emails found:** {len(raw)} | **Cleaned emails:** {len(clean)}")
-                    
                     if clean:
+                        st.markdown(f"### ✅ {site}")
+                        st.markdown(f"Found **{len(clean)}** valid emails (from {len(raw)} raw)")
+                        
                         df_clean = pd.DataFrame({"Email": clean})
                         st.dataframe(df_clean, use_container_width=True)
                     else:
-                        st.markdown("_No valid emails found after filtering._")
+                        st.markdown(f"### ⚠️ {site}")
+                        st.markdown(f"No valid emails found (raw found: {len(raw)})")
                     
-                    st.markdown("<div style='height:15px'></div>", unsafe_allow_html=True)
+                    st.markdown("<div style='height:10px'></div>", unsafe_allow_html=True)
         
         # All unique emails
         if unique_emails:
             st.markdown("---")
-            st.subheader("✅ All Unique Emails (Filtered)")
+            st.subheader("✅ All Unique Emails")
             
             df_all = pd.DataFrame({"Email": sorted(unique_emails)})
             st.dataframe(df_all, use_container_width=True, height=400)
@@ -401,41 +520,27 @@ if st.button("🚀 Extract Emails", type="primary"):
             st.download_button(
                 label="📥 Download All Emails (CSV)",
                 data=csv_bytes,
-                file_name=f"extracted_emails_{int(time.time())}.csv",
+                file_name=f"emails_{int(time.time())}.csv",
                 mime="text/csv",
                 type="primary"
             )
             
-            # Success notification
             st.balloons()
-            st.success(f"🎉 Extraction completed! Found **{len(unique_emails)}** unique valid emails from **{processed_count}** websites.")
+            st.success(f"🎉 Found **{len(unique_emails)}** unique emails from **{processed_count - error_count}** websites!")
         else:
-            st.warning("⚠️ No valid emails found after filtering.")
+            st.warning("⚠️ No emails found. Try increasing crawl depth or check if websites have contact pages.")
+            st.info("💡 Tip: Some websites hide emails on separate 'Contact' or 'About' pages. Increase crawl depth to 2-3.")
         
-        # Browser notification
+        # Notification
         if len(unique_emails) > 0:
             js_code = f"""
             <script>
-            function notifyMe() {{
-                if ("Notification" in window) {{
-                    if (Notification.permission === "granted") {{
-                        new Notification("Email Extractor", {{
-                            body: "Extraction complete! Found {len(unique_emails)} unique emails from {processed_count} websites.",
-                            icon: "https://cdn-icons-png.flaticon.com/512/561/561127.png"
-                        }});
-                    }} else if (Notification.permission !== "denied") {{
-                        Notification.requestPermission().then(function(permission) {{
-                            if (permission === "granted") {{
-                                new Notification("Email Extractor", {{
-                                    body: "Extraction complete! Found {len(unique_emails)} unique emails.",
-                                    icon: "https://cdn-icons-png.flaticon.com/512/561/561127.png"
-                                }});
-                            }}
-                        }});
-                    }}
-                }}
+            if ("Notification" in window && Notification.permission === "granted") {{
+                new Notification("Email Extractor", {{
+                    body: "Found {len(unique_emails)} emails from {processed_count - error_count} websites!",
+                    icon: "https://cdn-icons-png.flaticon.com/512/561/561127.png"
+                }});
             }}
-            notifyMe();
             </script>
             """
             import streamlit.components.v1 as components
@@ -444,6 +549,6 @@ if st.button("🚀 Extract Emails", type="primary"):
 # Footer
 st.markdown("""
 <div style="padding:12px; margin-top:32px; text-align:center; font-size:13px; color:#555; border-top:1px solid #eee;">
-    ⚡ Optimized Email Extractor v2.0 | © Shafiq Sanchy 2025
+    ⚡ Enhanced Email Extractor v2.1 | © Shafiq Sanchy 2025
 </div>
 """, unsafe_allow_html=True)
