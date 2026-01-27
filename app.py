@@ -263,36 +263,48 @@ with st.container():
             st.markdown(f"<p style='color:#0066cc; font-size:13px; margin-top:-10px;'>📊 {url_count} URL(s) added</p>", unsafe_allow_html=True)
     
     with col2:
-        crawl_depth = st.slider("Crawl depth (0=homepage)", 0, 1, 1)
-        max_pages = st.number_input("Max pages per site", 1, 200, 30)
+        crawl_depth = st.slider("Crawl depth (0=homepage)", 0, 3, 2)
+        max_pages = st.number_input("Max pages per site", 1, 500, 50)
         delay = st.number_input("Delay between requests (seconds)", 0.0, 5.0, 0.2, 0.1)
+        batch_size = st.number_input("Batch size (process in chunks)", 5, 100, 20)
 
 st.markdown("---")
 
-# Control buttons
-col_btn1, col_btn2, col_btn3, col_btn4 = st.columns([1, 1, 1, 3])
+# Control buttons with better state management
+if 'is_paused' not in st.session_state:
+    st.session_state.is_paused = False
+
+col_btn1, col_btn2, col_btn3, col_btn4, col_btn5 = st.columns([1.2, 1, 1, 1, 2.8])
 
 with col_btn1:
-    start_button = st.button("🚀 Start", use_container_width=True, disabled=st.session_state.extraction_running)
+    start_button = st.button("🚀 Start Extraction", use_container_width=True, 
+                            disabled=st.session_state.extraction_running,
+                            type="primary")
 
 with col_btn2:
-    if st.button("⏸️ Pause", use_container_width=True, disabled=not st.session_state.extraction_running):
-        if st.session_state.control:
-            st.session_state.control.pause()
-            st.info("⏸️ Extraction paused")
+    pause_button = st.button("⏸️ Pause", use_container_width=True, 
+                            disabled=not st.session_state.extraction_running or st.session_state.is_paused)
+    if pause_button and st.session_state.control:
+        st.session_state.control.pause()
+        st.session_state.is_paused = True
+        st.toast("⏸️ Paused", icon="⏸️")
 
 with col_btn3:
-    if st.button("▶️ Resume", use_container_width=True, disabled=not st.session_state.extraction_running):
-        if st.session_state.control:
-            st.session_state.control.resume()
-            st.success("▶️ Extraction resumed")
+    resume_button = st.button("▶️ Resume", use_container_width=True, 
+                             disabled=not st.session_state.extraction_running or not st.session_state.is_paused)
+    if resume_button and st.session_state.control:
+        st.session_state.control.resume()
+        st.session_state.is_paused = False
+        st.toast("▶️ Resumed", icon="▶️")
 
 with col_btn4:
-    if st.button("⏹️ Stop", use_container_width=True, disabled=not st.session_state.extraction_running):
-        if st.session_state.control:
-            st.session_state.control.stop()
-            st.session_state.extraction_running = False
-            st.warning("⏹️ Extraction stopped")
+    stop_button = st.button("⏹️ Stop", use_container_width=True, 
+                           disabled=not st.session_state.extraction_running)
+    if stop_button and st.session_state.control:
+        st.session_state.control.stop()
+        st.session_state.extraction_running = False
+        st.session_state.is_paused = False
+        st.toast("⏹️ Stopped", icon="⏹️")
 
 st.markdown("<div style='height:12px'></div>", unsafe_allow_html=True)
 
@@ -309,66 +321,109 @@ if start_button:
     else:
         st.session_state.extraction_running = True
         st.session_state.control = CrawlerControl()
+        st.session_state.is_paused = False
         control = st.session_state.control
         
-        st.info(f"⏳ Starting extraction from {len(websites)} website(s)...")
-        
         # Create placeholders for dynamic updates
-        progress_bar = st.progress(0)
-        status_text = st.empty()
-        activity_log = st.empty()
+        main_container = st.container()
+        
+        with main_container:
+            col_status1, col_status2 = st.columns([2, 1])
+            with col_status1:
+                st.info(f"⏳ Processing {len(websites)} website(s) in batches of {batch_size}...")
+            with col_status2:
+                # Compact summary on the side
+                summary_placeholder = st.empty()
+            
+            progress_bar = st.progress(0)
+            status_text = st.empty()
+            
+            # Collapsible activity log
+            with st.expander("📊 Detailed Activity & Progress", expanded=False):
+                activity_log = st.empty()
+                site_stats = st.empty()
         
         all_results = {}
         unique_emails = set()
         completed = 0
         activity_messages = []
-
-        # crawl in parallel
-        with ThreadPoolExecutor(max_workers=MAX_CRAWL_WORKERS) as executor:
-            futures = {executor.submit(crawl_site, url, crawl_depth, max_pages, delay, control): url for url in websites}
+        
+        # Process in batches to avoid streamlit timeout
+        total_batches = (len(websites) + batch_size - 1) // batch_size
+        
+        for batch_num in range(total_batches):
+            if control.is_stopped():
+                break
             
-            for fut in as_completed(futures):
-                if control.is_stopped():
-                    # Cancel remaining futures
-                    for f in futures:
-                        f.cancel()
-                    break
+            start_idx = batch_num * batch_size
+            end_idx = min(start_idx + batch_size, len(websites))
+            batch_websites = websites[start_idx:end_idx]
+            
+            # crawl batch in parallel
+            with ThreadPoolExecutor(max_workers=MAX_CRAWL_WORKERS) as executor:
+                futures = {executor.submit(crawl_site, url, crawl_depth, max_pages, delay, control): url for url in batch_websites}
                 
-                url = futures[fut]
-                try:
-                    _, raw_emails = fut.result()
+                for fut in as_completed(futures):
+                    if control.is_stopped():
+                        for f in futures:
+                            f.cancel()
+                        break
                     
-                    # filter garbage & excluded keywords now
-                    cleaned = {e for e in raw_emails if not looks_like_garbage(e)}
-                    # also filter EXCLUDED_KEYWORDS explicitly
-                    cleaned = {e for e in cleaned if not any(k in e for k in EXCLUDED_KEYWORDS)}
-                    
-                    all_results[url] = {
-                        "raw": sorted(raw_emails),
-                        "clean": sorted(cleaned)
-                    }
-                    unique_emails.update(cleaned)
-                    
-                    completed += 1
-                    progress = completed / len(websites)
-                    progress_bar.progress(progress)
-                    
-                    # Update status
-                    status_text.markdown(f"**Progress: {completed}/{len(websites)} websites processed** | Found: {len(unique_emails)} unique emails")
-                    
-                    # Update activity log
-                    activity_messages.append(f"✅ {url} - Found {len(cleaned)} clean emails")
-                    if len(activity_messages) > 10:
-                        activity_messages.pop(0)
-                    activity_log.markdown("**Recent Activity:**\n" + "\n".join([f"- {msg}" for msg in activity_messages]))
-                    
-                except Exception as e:
-                    activity_messages.append(f"❌ {url} - Error: {str(e)[:50]}")
-                    if len(activity_messages) > 10:
-                        activity_messages.pop(0)
-                    activity_log.markdown("**Recent Activity:**\n" + "\n".join([f"- {msg}" for msg in activity_messages]))
+                    url = futures[fut]
+                    try:
+                        _, raw_emails = fut.result()
+                        
+                        # filter garbage & excluded keywords
+                        cleaned = {e for e in raw_emails if not looks_like_garbage(e)}
+                        cleaned = {e for e in cleaned if not any(k in e for k in EXCLUDED_KEYWORDS)}
+                        
+                        all_results[url] = {
+                            "raw": sorted(raw_emails),
+                            "clean": sorted(cleaned)
+                        }
+                        unique_emails.update(cleaned)
+                        
+                        completed += 1
+                        progress = completed / len(websites)
+                        progress_bar.progress(progress)
+                        
+                        # Update compact summary
+                        summary_placeholder.markdown(f"""
+                        <div style='background:#f0f8ff; padding:8px; border-radius:5px; font-size:12px;'>
+                        <b>📊 Quick Stats</b><br>
+                        ✅ Processed: {completed}/{len(websites)}<br>
+                        📧 Unique Emails: {len(unique_emails)}<br>
+                        📦 Batch: {batch_num + 1}/{total_batches}
+                        </div>
+                        """, unsafe_allow_html=True)
+                        
+                        # Update status
+                        status_text.markdown(f"**Processing:** {completed}/{len(websites)} websites | **Found:** {len(unique_emails)} unique emails | **Batch:** {batch_num + 1}/{total_batches}")
+                        
+                        # Update activity log in dropdown
+                        activity_messages.append(f"✅ {url[:50]}... → {len(cleaned)} emails")
+                        if len(activity_messages) > 15:
+                            activity_messages.pop(0)
+                        activity_log.markdown("**Recent Activity:**\n" + "\n".join([f"- {msg}" for msg in activity_messages[-15:]]))
+                        
+                        # Site stats in dropdown
+                        site_stats_text = "**Website Email Counts:**\n"
+                        for site, data in list(all_results.items())[-10:]:
+                            site_stats_text += f"- {site[:40]}... → {len(data['clean'])} emails\n"
+                        site_stats.markdown(site_stats_text)
+                        
+                    except Exception as e:
+                        activity_messages.append(f"❌ {url[:50]}... → Error")
+                        if len(activity_messages) > 15:
+                            activity_messages.pop(0)
+                        activity_log.markdown("**Recent Activity:**\n" + "\n".join([f"- {msg}" for msg in activity_messages[-15:]]))
+            
+            # Small delay between batches
+            if not control.is_stopped() and batch_num < total_batches - 1:
+                time.sleep(0.5)
 
         st.session_state.extraction_running = False
+        st.session_state.is_paused = False
         
         if control.is_stopped():
             st.warning("⏹️ Extraction was stopped by user")
@@ -378,59 +433,74 @@ if start_button:
         
         st.markdown("---")
         
-        # show raw + cleaned per site with safe heights to avoid overlap
-        st.subheader("📋 Extracted Emails per Website")
-        for site, data in all_results.items():
-            with st.expander(f"🌐 {site}", expanded=False):
+        # Direct email display for easy copying
+        st.subheader("📧 All Extracted Emails")
+        
+        if unique_emails:
+            col_display, col_download = st.columns([3, 1])
+            
+            with col_display:
+                # Create copyable text area with all emails
+                emails_text = "\n".join(sorted(unique_emails))
+                st.text_area("Copy all emails from here:", emails_text, height=300, 
+                           help="Select all (Ctrl+A / Cmd+A) and copy (Ctrl+C / Cmd+C)")
+            
+            with col_download:
+                st.markdown("<div style='height:42px'></div>", unsafe_allow_html=True)
+                # CSV download
+                csv_buffer = io.StringIO()
+                writer = csv.writer(csv_buffer)
+                writer.writerow(["website", "email"])
+                for site, data in all_results.items():
+                    for e in data["clean"]:
+                        writer.writerow([site, e])
+                csv_bytes = csv_buffer.getvalue().encode("utf-8")
+                st.download_button("📥 Download CSV", data=csv_bytes, file_name="emails.csv", 
+                                 mime="text/csv", use_container_width=True)
+                
+                # Text file download
+                txt_bytes = emails_text.encode("utf-8")
+                st.download_button("📄 Download TXT", data=txt_bytes, file_name="emails.txt", 
+                                 mime="text/plain", use_container_width=True)
+                
+                # Show compact stats
+                st.markdown(f"""
+                <div style='background:#e8f5e9; padding:10px; border-radius:5px; margin-top:12px;'>
+                <b>📊 Final Results</b><br>
+                <small>
+                • Sites: {len(all_results)}<br>
+                • Raw: {sum(len(data['raw']) for data in all_results.values())}<br>
+                • Clean: {len(unique_emails)}
+                </small>
+                </div>
+                """, unsafe_allow_html=True)
+        else:
+            st.info("No emails found from the provided websites.")
+        
+        # Detailed results in collapsible section
+        with st.expander("🔍 Detailed Results by Website", expanded=False):
+            for site, data in all_results.items():
+                st.markdown(f"**🌐 {site}**")
                 raw = data["raw"]
                 clean = data["clean"]
-
-                # Raw (if any)
-                st.markdown("**Raw Emails Found:**")
-                if raw:
-                    df_raw = pd.DataFrame({"Email": raw})
-                    # safe height calculation
-                    rows = max(1, len(df_raw))
-                    height = max(180, min(500, 32 * rows))
-                    st.dataframe(df_raw, height=height, use_container_width=True)
-                else:
-                    st.markdown("→ No raw emails found.")
-
-                st.markdown("<div style='height:10px'></div>", unsafe_allow_html=True)
-
-                # Clean (if any)
-                st.markdown("**Filtered Emails (cleaned):**")
-                if clean:
-                    df_clean = pd.DataFrame({"Email": clean})
-                    rows = max(1, len(df_clean))
-                    height = max(180, min(600, 32 * rows))
-                    st.dataframe(df_clean, height=height, use_container_width=True)
-                else:
-                    st.markdown("→ No filtered emails found.")
-
-        st.markdown("---")
-        
-        # Final summary
-        st.subheader("📊 Summary")
-        col_sum1, col_sum2, col_sum3 = st.columns(3)
-        with col_sum1:
-            st.metric("Websites Processed", completed)
-        with col_sum2:
-            st.metric("Total Raw Emails", sum(len(data["raw"]) for data in all_results.values()))
-        with col_sum3:
-            st.metric("Unique Clean Emails", len(unique_emails))
-
-        # CSV download (prepared once)
-        if unique_emails:
-            csv_buffer = io.StringIO()
-            writer = csv.writer(csv_buffer)
-            writer.writerow(["website", "email"])
-            for site, data in all_results.items():
-                for e in data["clean"]:
-                    writer.writerow([site, e])
-            csv_bytes = csv_buffer.getvalue().encode("utf-8")
-            st.markdown("<div style='height:18px'></div>", unsafe_allow_html=True)
-            st.download_button("📥 Download all emails (CSV)", data=csv_bytes, file_name="emails.csv", mime="text/csv")
+                
+                col_raw, col_clean = st.columns(2)
+                
+                with col_raw:
+                    st.markdown(f"*Raw: {len(raw)} emails*")
+                    if raw:
+                        st.text("\n".join(raw[:20]))
+                        if len(raw) > 20:
+                            st.markdown(f"*...and {len(raw) - 20} more*")
+                
+                with col_clean:
+                    st.markdown(f"*Clean: {len(clean)} emails*")
+                    if clean:
+                        st.text("\n".join(clean[:20]))
+                        if len(clean) > 20:
+                            st.markdown(f"*...and {len(clean) - 20} more*")
+                
+                st.markdown("---")
 
         # Finish notification & branding
         if not control.is_stopped():
