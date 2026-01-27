@@ -6,7 +6,7 @@ Features:
 - Robust email extraction (text + mailto)
 - Strong garbage filtering
 - Batch processing for unlimited URLs
-- Real-time progress tracking
+- Real-time progress tracking and email display
 - User-friendly interface
 """
 
@@ -164,35 +164,23 @@ st.set_page_config(page_title="Email Extractor", layout="wide")
 st.markdown("""
 <div style="margin-bottom:12px;">
   <h1 style="color:#1F2328;">📧 Email Extractor</h1>
-  <p style="color:#333; font-size:14px;">Fast email extraction with real-time progress tracking</p>
+  <p style="color:#333; font-size:14px;">Paste website URLs (one per line). Fast extraction with real-time progress tracking.</p>
 </div>
 """, unsafe_allow_html=True)
 
 with st.container():
-    col1, col2 = st.columns([2.5, 1.5])
+    col1, col2 = st.columns([3, 1])
     with col1:
-        urls_input = st.text_area("📝 Enter website URLs (one per line)", height=280, 
-                                 placeholder="https://example.com\nhttps://another-site.com")
-        # Count URLs
-        url_lines = [line.strip() for line in urls_input.splitlines() if line.strip()]
-        url_count = len([normalize_url(line) for line in url_lines if normalize_url(line)])
-        if url_count > 0:
-            st.markdown(f"<div style='background:#e3f2fd; padding:8px; border-radius:5px; margin-top:8px;'><b>📊 {url_count} URL(s) ready to process</b></div>", unsafe_allow_html=True)
-    
+        urls_input = st.text_area("Enter website URLs (one per line)", height=350)
     with col2:
-        st.markdown("### ⚙️ Settings")
-        crawl_depth = st.slider("🔍 Crawl depth", 0, 3, 2, help="0 = homepage only, 3 = deep crawl")
-        max_pages = st.number_input("📄 Max pages per site", 10, 500, 50, step=10)
-        delay = st.number_input("⏱️ Delay (seconds)", 0.0, 2.0, 0.1, 0.1, help="Delay between requests")
-        batch_size = st.number_input("📦 Batch size", 10, 100, 25, step=5, help="Process URLs in batches")
+        crawl_depth = st.slider("Crawl depth (0=homepage)", 0, 3, 2)
+        max_pages = st.number_input("Max pages per site", 1, 500, 50)
+        delay = st.number_input("Delay between requests (seconds)", 0.0, 5.0, 0.2, 0.1)
 
 st.markdown("---")
 
-# Extract button
-extract_button = st.button("🚀 Extract Emails", use_container_width=False, type="primary")
-
-if extract_button:
-    # Normalize and resolve URLs
+if st.button("🚀 Extract Emails"):
+    # normalize and resolve
     websites = []
     for line in urls_input.splitlines():
         n = normalize_url(line)
@@ -200,27 +188,25 @@ if extract_button:
             websites.append(resolve_url(n))
 
     if not websites:
-        st.warning("⚠️ Please enter at least one URL.")
+        st.warning("Please enter at least one URL.")
     else:
-        # Create placeholders
-        main_container = st.container()
+        st.info(f"⏳ Starting extraction from {len(websites)} website(s)...")
         
-        with main_container:
-            st.info(f"⏳ Processing {len(websites)} website(s) in batches of {batch_size}...")
-            
-            progress_bar = st.progress(0)
-            status_placeholder = st.empty()
-            
-            # Collapsible activity log
-            with st.expander("📊 Processing Details", expanded=False):
-                activity_log = st.empty()
+        # Create placeholders for real-time updates
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+        activity_container = st.container()
+        
+        # Real-time email display
+        st.markdown("### 📧 Extracted Emails (Real-time)")
+        realtime_email_display = st.empty()
         
         all_results = {}
         unique_emails = set()
         completed = 0
-        activity_messages = []
-        
-        # Process in batches
+
+        # Batch processing
+        batch_size = 25
         total_batches = (len(websites) + batch_size - 1) // batch_size
         
         for batch_num in range(total_batches):
@@ -228,7 +214,7 @@ if extract_button:
             end_idx = min(start_idx + batch_size, len(websites))
             batch_websites = websites[start_idx:end_idx]
             
-            # Crawl batch in parallel
+            # crawl batch in parallel
             with ThreadPoolExecutor(max_workers=MAX_CRAWL_WORKERS) as executor:
                 futures = {executor.submit(crawl_site, url, crawl_depth, max_pages, delay): url for url in batch_websites}
                 
@@ -237,7 +223,7 @@ if extract_button:
                     try:
                         _, raw_emails = fut.result()
                         
-                        # Filter garbage
+                        # filter garbage & excluded keywords
                         cleaned = {e for e in raw_emails if not looks_like_garbage(e)}
                         cleaned = {e for e in cleaned if not any(k in e for k in EXCLUDED_KEYWORDS)}
                         
@@ -252,60 +238,83 @@ if extract_button:
                         progress_bar.progress(progress)
                         
                         # Update status
-                        status_placeholder.markdown(f"""
-                        <div style='background:#f5f5f5; padding:12px; border-radius:8px; border-left:4px solid #2196F3;'>
-                        <b>Progress:</b> {completed}/{len(websites)} websites | 
-                        <b>Found:</b> {len(unique_emails)} unique emails | 
-                        <b>Batch:</b> {batch_num + 1}/{total_batches}
-                        </div>
-                        """, unsafe_allow_html=True)
+                        status_text.markdown(f"**Progress: {completed}/{len(websites)} websites processed | Found: {len(unique_emails)} unique emails**")
                         
-                        # Update activity log
-                        activity_messages.append(f"✅ {url[:60]}... → {len(cleaned)} emails")
-                        if len(activity_messages) > 20:
-                            activity_messages.pop(0)
-                        activity_log.markdown("\n".join([f"- {msg}" for msg in activity_messages[-20:]]))
+                        # Real-time email display
+                        if unique_emails:
+                            emails_text = "\n".join(sorted(unique_emails))
+                            realtime_email_display.text_area(
+                                f"✅ Found {len(unique_emails)} unique emails so far:",
+                                emails_text,
+                                height=300,
+                                key=f"realtime_{completed}"
+                            )
                         
-                    except Exception:
-                        activity_messages.append(f"❌ {url[:60]}... → Error")
-                        if len(activity_messages) > 20:
-                            activity_messages.pop(0)
-                        activity_log.markdown("\n".join([f"- {msg}" for msg in activity_messages[-20:]]))
-
+                    except Exception as e:
+                        pass
+        
+        # Show simple activity summary
+        with activity_container:
+            with st.expander("📊 Processing Summary", expanded=False):
+                st.markdown(f"**Total websites processed:** {completed}/{len(websites)}")
+                st.markdown(f"**Total batches:** {total_batches}")
+                st.markdown(f"**Unique emails found:** {len(unique_emails)}")
+                
+                # Show per-site summary
+                st.markdown("**Emails per website:**")
+                for site, data in all_results.items():
+                    st.markdown(f"- {site}: {len(data['clean'])} emails")
+        
         progress_bar.progress(1.0)
-        st.success(f"✅ Extraction completed! Found {len(unique_emails)} unique emails from {len(all_results)} websites")
+        st.success(f"✅ Extraction completed!")
         
         st.markdown("---")
         
-        # Direct email display
-        st.subheader("📧 Extracted Emails")
+        # Final results with copy button
+        st.subheader("📋 Final Results")
         
         if unique_emails:
-            col_main, col_side = st.columns([2.5, 1.5])
+            emails_text = "\n".join(sorted(unique_emails))
             
-            with col_main:
-                emails_text = "\n".join(sorted(unique_emails))
-                st.text_area("✅ All emails found (copy from here):", emails_text, height=350, 
-                           help="Select all (Ctrl+A / Cmd+A) and copy (Ctrl+C / Cmd+C)")
+            # Text area with emails
+            col_text, col_btn = st.columns([4, 1])
+            with col_text:
+                st.text_area("All extracted emails:", emails_text, height=400, key="final_emails")
             
-            with col_side:
-                # Stats card
-                st.markdown(f"""
-                <div style='background:linear-gradient(135deg, #667eea 0%, #764ba2 100%); 
-                            padding:20px; border-radius:10px; color:white; margin-bottom:15px;'>
-                    <h3 style='margin:0; color:white;'>📊 Results</h3>
-                    <hr style='margin:10px 0; border-color:rgba(255,255,255,0.3);'>
-                    <p style='margin:5px 0; font-size:16px;'>
-                        <b>🌐 Sites:</b> {len(all_results)}<br>
-                        <b>📨 Raw:</b> {sum(len(data['raw']) for data in all_results.values())}<br>
-                        <b>✨ Clean:</b> {len(unique_emails)}
-                    </p>
-                </div>
-                """, unsafe_allow_html=True)
+            with col_btn:
+                st.markdown("<div style='height:28px'></div>", unsafe_allow_html=True)
+                # Copy button using JavaScript
+                copy_js = f"""
+                <button onclick="copyToClipboard()" style="
+                    background-color:#2196F3;
+                    color:white;
+                    padding:10px 20px;
+                    border:none;
+                    border-radius:5px;
+                    cursor:pointer;
+                    font-size:14px;
+                    font-weight:bold;
+                    width:100%;
+                ">
+                    📋 Copy All
+                </button>
+                <script>
+                function copyToClipboard() {{
+                    const text = `{emails_text}`;
+                    navigator.clipboard.writeText(text).then(function() {{
+                        alert('✅ Copied {len(unique_emails)} emails to clipboard!');
+                    }}, function(err) {{
+                        alert('❌ Failed to copy');
+                    }});
+                }}
+                </script>
+                """
+                import streamlit.components.v1 as components
+                components.html(copy_js, height=50)
+                
+                st.markdown("<div style='height:10px'></div>", unsafe_allow_html=True)
                 
                 # Download buttons
-                st.markdown("### 💾 Download")
-                
                 # CSV
                 csv_buffer = io.StringIO()
                 writer = csv.writer(csv_buffer)
@@ -314,50 +323,61 @@ if extract_button:
                     for e in data["clean"]:
                         writer.writerow([site, e])
                 csv_bytes = csv_buffer.getvalue().encode("utf-8")
-                st.download_button("📥 CSV File", data=csv_bytes, file_name="emails.csv", 
+                st.download_button("📥 Download CSV", data=csv_bytes, file_name="emails.csv", 
                                  mime="text/csv", use_container_width=True)
                 
                 # TXT
                 txt_bytes = emails_text.encode("utf-8")
-                st.download_button("📄 TXT File", data=txt_bytes, file_name="emails.txt", 
+                st.download_button("📄 Download TXT", data=txt_bytes, file_name="emails.txt", 
                                  mime="text/plain", use_container_width=True)
-        else:
-            st.info("No emails found from the provided websites.")
+            
+            # Summary
+            st.markdown("---")
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric("Websites Processed", completed)
+            with col2:
+                st.metric("Total Raw Emails", sum(len(data["raw"]) for data in all_results.values()))
+            with col3:
+                st.metric("Unique Clean Emails", len(unique_emails))
         
-        st.markdown("<div style='height:20px'></div>", unsafe_allow_html=True)
-        
-        # Detailed results
+        # Detailed results per website
+        st.markdown("---")
         with st.expander("🔍 Detailed Results by Website", expanded=False):
             for site, data in all_results.items():
-                st.markdown(f"**🌐 {site}**")
+                st.markdown(f"### 🌐 {site}")
                 raw = data["raw"]
                 clean = data["clean"]
-                
+
                 col_raw, col_clean = st.columns(2)
                 
                 with col_raw:
-                    st.markdown(f"*Raw: {len(raw)} emails*")
+                    st.markdown("**Raw Emails Found:**")
                     if raw:
-                        display_raw = raw[:25]
-                        st.code("\n".join(display_raw), language=None)
-                        if len(raw) > 25:
-                            st.markdown(f"*...and {len(raw) - 25} more*")
-                
+                        df_raw = pd.DataFrame({"Email": raw})
+                        rows = max(1, len(df_raw))
+                        height = max(180, min(500, 32 * rows))
+                        st.dataframe(df_raw, height=height)
+                    else:
+                        st.markdown("→ No raw emails found.")
+
                 with col_clean:
-                    st.markdown(f"*Clean: {len(clean)} emails*")
+                    st.markdown("**Filtered Emails (cleaned):**")
                     if clean:
-                        display_clean = clean[:25]
-                        st.code("\n".join(display_clean), language=None)
-                        if len(clean) > 25:
-                            st.markdown(f"*...and {len(clean) - 25} more*")
+                        df_clean = pd.DataFrame({"Email": clean})
+                        rows = max(1, len(df_clean))
+                        height = max(180, min(600, 32 * rows))
+                        st.dataframe(df_clean, height=height)
+                    else:
+                        st.markdown("→ No filtered emails found.")
                 
-                st.markdown("---")
-        
-        # Notifications
+                st.markdown("<div style='height:18px'></div>", unsafe_allow_html=True)
+
+        # Finish notification
         st.balloons()
         st.info("💡 Done by Shafiq Sanchy")
 
-        # Browser notification
+        # browser notification + sound
         js_code = f"""
         <script>
         function notifyMe() {{
@@ -368,7 +388,7 @@ if extract_button:
             if (Notification.permission !== "granted") Notification.requestPermission();
             if (Notification.permission === "granted") {{
                 new Notification("Email Extractor", {{
-                    body: "Done! {len(unique_emails)} unique emails found",
+                    body: "Done! {len(unique_emails)} unique cleaned emails",
                     icon: "https://cdn-icons-png.flaticon.com/512/561/561127.png"
                 }});
             }}
@@ -381,7 +401,7 @@ if extract_button:
         import streamlit.components.v1 as components
         components.html(js_code, height=0, width=0)
 
-# Footer
+# footer
 st.markdown("""
 <div style="padding:12px; margin-top:32px; text-align:center; font-size:13px; color:#555; border-top:1px solid #eee;">
 © Shafiq Sanchy 2025
